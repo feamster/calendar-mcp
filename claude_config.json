@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "calendar": {
+      "command": "python",
+      "args": ["-m", "calendar_mcp.server"],
+      "cwd": "/Users/feamster/src/calendar-mcp"
+    }
+  }
+}
