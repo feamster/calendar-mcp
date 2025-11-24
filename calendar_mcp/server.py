@@ -35,12 +35,14 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="list_calendar_events",
-        description="List calendar events from all calendars",
+        description="List calendar events from all calendars with flexible date filtering",
         inputSchema={
             "type": "object",
             "properties": {
-                "days": {"type": "number", "description": "Days ahead to look (default: 7)", "default": 7},
-                "maxResults": {"type": "number", "description": "Max results", "default": 20},
+                "startDate": {"type": "string", "description": "Start of date range (ISO format: YYYY-MM-DD or full datetime). Defaults to now."},
+                "endDate": {"type": "string", "description": "End of date range (ISO format). If omitted, uses startDate + days."},
+                "days": {"type": "number", "description": "Days ahead from startDate (ignored if endDate provided)", "default": 7},
+                "maxResults": {"type": "number", "description": "Max results", "default": 50},
                 "query": {"type": "string", "description": "Search query"}
             }
         }
@@ -221,15 +223,41 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             )]
 
         elif name == "list_calendar_events":
+            start_date_str = arguments.get('startDate')
+            end_date_str = arguments.get('endDate')
             days = arguments.get('days', 7)
-            max_results = arguments.get('maxResults', 20)
+            max_results = arguments.get('maxResults', 50)
             query = arguments.get('query')
 
+            # Parse dates flexibly
+            def parse_date(date_str: str) -> datetime:
+                """Parse ISO date or datetime string."""
+                try:
+                    # Try parsing as full datetime
+                    return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                except ValueError:
+                    # Try parsing as date only (assume start of day in UTC)
+                    try:
+                        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                        return date_obj.replace(tzinfo=ZoneInfo("UTC"))
+                    except ValueError:
+                        raise ValueError(f"Invalid date format: {date_str}. Use YYYY-MM-DD or ISO datetime.")
+
+            # Determine time range based on provided parameters
             now = datetime.now(ZoneInfo("UTC"))
-            time_max = now + timedelta(days=days)
+
+            if start_date_str:
+                time_min = parse_date(start_date_str)
+            else:
+                time_min = now
+
+            if end_date_str:
+                time_max = parse_date(end_date_str)
+            else:
+                time_max = time_min + timedelta(days=days)
 
             result = calendar.list_events(
-                time_min=now,
+                time_min=time_min,
                 time_max=time_max,
                 max_results=max_results,
                 query=query
