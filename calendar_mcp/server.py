@@ -168,6 +168,19 @@ TOOLS: list[Tool] = [
             },
             "required": ["eventId", "response"]
         }
+    ),
+    Tool(
+        name="respond_to_pending_invitations",
+        description="Accept or decline ALL pending calendar invitations at once (bulk response)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "response": {"type": "string", "description": "Response: 'accepted', 'declined', or 'tentative'", "enum": ["accepted", "declined", "tentative"]},
+                "daysAhead": {"type": "number", "description": "Days ahead to look for pending invitations (default: 90)", "default": 90},
+                "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"}
+            },
+            "required": ["response"]
+        }
     )
 ]
 
@@ -452,6 +465,28 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 response=response,
                 calendar_id=calendar_id,
                 comment=comment
+            )
+
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "respond_to_pending_invitations":
+            response = arguments.get('response')
+            days_ahead = arguments.get('daysAhead', 90)
+            calendar_id = arguments.get('calendarId', 'primary')
+
+            if not response:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({'error': 'response is required'})
+                )]
+
+            result = calendar.respond_to_pending_invitations(
+                response=response,
+                days_ahead=days_ahead,
+                calendar_id=calendar_id
             )
 
             return [TextContent(

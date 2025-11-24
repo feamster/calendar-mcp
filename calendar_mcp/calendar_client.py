@@ -1056,3 +1056,116 @@ class CalendarClient:
                 'error': str(e),
                 'message': f"Failed to respond to event: {str(e)}"
             }
+
+    def respond_to_pending_invitations(
+        self,
+        response: str,
+        days_ahead: int = 90,
+        calendar_id: str = 'primary'
+    ) -> Dict[str, Any]:
+        """Respond to all pending calendar invitations at once.
+
+        Args:
+            response: Response status - 'accepted', 'declined', or 'tentative'
+            days_ahead: How many days ahead to look for pending invitations (default: 90)
+            calendar_id: Calendar to check (default: 'primary')
+
+        Returns:
+            Dictionary with list of updated events and summary
+        """
+        valid_responses = ['accepted', 'declined', 'tentative']
+        if response.lower() not in valid_responses:
+            return {
+                'success': False,
+                'error': f"Invalid response. Must be one of: {', '.join(valid_responses)}"
+            }
+
+        try:
+            # Get events for the next N days
+            now = datetime.now(ZoneInfo("UTC"))
+            time_max = now + timedelta(days=days_ahead)
+
+            result = self.list_events(
+                time_min=now,
+                time_max=time_max,
+                max_results=500,
+                calendar_ids=[calendar_id]
+            )
+
+            events = result.get('events', [])
+
+            # Filter for events where user hasn't responded yet
+            pending_events = []
+            for event in events:
+                attendees = event.get('attendees', [])
+                for attendee in attendees:
+                    if attendee.get('self', False) and attendee.get('responseStatus') == 'needsAction':
+                        pending_events.append(event)
+                        break
+
+            if not pending_events:
+                return {
+                    'success': True,
+                    'updated_count': 0,
+                    'events': [],
+                    'message': 'No pending invitations found'
+                }
+
+            # Respond to each pending invitation
+            updated_events = []
+            failed_events = []
+
+            for event in pending_events:
+                event_id = event.get('id')
+                event_summary = event.get('summary', 'Untitled Event')
+
+                try:
+                    # Get full event details and update
+                    full_event = self.service.events().get(
+                        calendarId=calendar_id,
+                        eventId=event_id
+                    ).execute()
+
+                    # Update response status
+                    attendees = full_event.get('attendees', [])
+                    for attendee in attendees:
+                        if attendee.get('self', False):
+                            attendee['responseStatus'] = response.lower()
+                            break
+
+                    # Update the event
+                    updated_event = self.service.events().update(
+                        calendarId=calendar_id,
+                        eventId=event_id,
+                        body=full_event
+                    ).execute()
+
+                    updated_events.append({
+                        'event_id': event_id,
+                        'summary': event_summary,
+                        'start': event.get('start'),
+                        'response': response.lower()
+                    })
+
+                except Exception as e:
+                    failed_events.append({
+                        'event_id': event_id,
+                        'summary': event_summary,
+                        'error': str(e)
+                    })
+
+            return {
+                'success': True,
+                'updated_count': len(updated_events),
+                'failed_count': len(failed_events),
+                'events': updated_events,
+                'failed': failed_events if failed_events else None,
+                'message': f"Responded '{response}' to {len(updated_events)} invitation(s)"
+            }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'message': f"Failed to process pending invitations: {str(e)}"
+            }
