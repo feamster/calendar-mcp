@@ -4,6 +4,9 @@ credentials.json
 *.token
 .credentials/
 
+# Local drafts
+SUBSTACK_POST.md
+
 # Python
 __pycache__/
 *.py[cod]
