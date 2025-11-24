@@ -157,14 +157,15 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="respond_to_event",
-        description="Accept, decline, or tentatively accept a calendar invitation",
+        description="Accept, decline, or tentatively accept a calendar invitation (supports recurring events)",
         inputSchema={
             "type": "object",
             "properties": {
                 "eventId": {"type": "string", "description": "Event ID to respond to"},
                 "response": {"type": "string", "description": "Response: 'accepted', 'declined', or 'tentative'", "enum": ["accepted", "declined", "tentative"]},
                 "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"},
-                "comment": {"type": "string", "description": "Optional comment with response"}
+                "comment": {"type": "string", "description": "Optional comment with response"},
+                "respondToSeries": {"type": "boolean", "description": "If true and event is recurring, respond to ALL instances (default: false)", "default": False}
             },
             "required": ["eventId", "response"]
         }
@@ -451,6 +452,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             response = arguments.get('response')
             calendar_id = arguments.get('calendarId', 'primary')
             comment = arguments.get('comment')
+            respond_to_series = arguments.get('respondToSeries', False)
 
             if not event_id or not response:
                 return [TextContent(
@@ -464,7 +466,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 event_id=event_id,
                 response=response,
                 calendar_id=calendar_id,
-                comment=comment
+                comment=comment,
+                respond_to_series=respond_to_series
             )
 
             return [TextContent(

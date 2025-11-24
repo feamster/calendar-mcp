@@ -989,7 +989,8 @@ class CalendarClient:
         event_id: str,
         response: str,
         calendar_id: str = 'primary',
-        comment: Optional[str] = None
+        comment: Optional[str] = None,
+        respond_to_series: bool = False
     ) -> Dict[str, Any]:
         """Respond to a calendar event invitation (accept/decline/tentative).
 
@@ -998,6 +999,7 @@ class CalendarClient:
             response: Response status - 'accepted', 'declined', or 'tentative'
             calendar_id: Calendar containing the event (default: 'primary')
             comment: Optional comment to include with response
+            respond_to_series: If True and event is recurring, respond to all instances (default: False)
 
         Returns:
             Dictionary with success status and updated event details
@@ -1015,6 +1017,20 @@ class CalendarClient:
                 calendarId=calendar_id,
                 eventId=event_id
             ).execute()
+
+            # Check if this is a recurring event instance
+            recurring_event_id = event.get('recurringEventId')
+            is_recurring = recurring_event_id is not None
+
+            # If user wants to respond to series and this is recurring, use the series ID
+            target_event_id = event_id
+            if respond_to_series and is_recurring:
+                target_event_id = recurring_event_id
+                # Get the recurring event (master)
+                event = self.service.events().get(
+                    calendarId=calendar_id,
+                    eventId=target_event_id
+                ).execute()
 
             # Get current user's email from credentials
             # We'll look for the attendee matching our calendar
@@ -1039,16 +1055,22 @@ class CalendarClient:
             # Update the event
             updated_event = self.service.events().update(
                 calendarId=calendar_id,
-                eventId=event_id,
+                eventId=target_event_id,
                 body=event
             ).execute()
 
+            message = f"Responded '{response}' to event '{updated_event.get('summary')}'"
+            if respond_to_series and is_recurring:
+                message += " (all instances)"
+
             return {
                 'success': True,
-                'event_id': event_id,
+                'event_id': target_event_id,
                 'event_summary': updated_event.get('summary'),
                 'response': response.lower(),
-                'message': f"Responded '{response}' to event '{updated_event.get('summary')}'"
+                'is_recurring': is_recurring,
+                'responded_to_series': respond_to_series and is_recurring,
+                'message': message
             }
         except Exception as e:
             return {
