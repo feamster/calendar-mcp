@@ -35,13 +35,14 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="list_calendar_events",
-        description="List calendar events from all calendars",
+        description="List calendar events from all calendars with flexible date filtering",
         inputSchema={
             "type": "object",
             "properties": {
-                "startDate": {"type": "string", "description": "Start date (YYYY-MM-DD or ISO format, default: today)"},
-                "endDate": {"type": "string", "description": "End date (YYYY-MM-DD or ISO format, default: 7 days from start)"},
-                "maxResults": {"type": "number", "description": "Max results", "default": 20},
+                "startDate": {"type": "string", "description": "Start of date range (YYYY-MM-DD or ISO format, default: today)"},
+                "endDate": {"type": "string", "description": "End of date range (YYYY-MM-DD or ISO format). If omitted, uses startDate + days."},
+                "days": {"type": "number", "description": "Days ahead from startDate (ignored if endDate provided)", "default": 7},
+                "maxResults": {"type": "number", "description": "Max results", "default": 50},
                 "query": {"type": "string", "description": "Search query"}
             }
         }
@@ -224,7 +225,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         elif name == "list_calendar_events":
             start_date_str = arguments.get('startDate')
             end_date_str = arguments.get('endDate')
-            max_results = arguments.get('maxResults', 20)
+            days = arguments.get('days', 7)
+            max_results = arguments.get('maxResults', 50)
             query = arguments.get('query')
 
             # Parse start date (default: now)
@@ -250,7 +252,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             else:
                 time_min = datetime.now(ZoneInfo("UTC"))
 
-            # Parse end date (default: 7 days from start)
+            # Parse end date (default: startDate + days)
             if end_date_str:
                 try:
                     if 'T' in end_date_str:
@@ -270,7 +272,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                         })
                     )]
             else:
-                time_max = time_min + timedelta(days=7)
+                time_max = time_min + timedelta(days=days)
 
             result = calendar.list_events(
                 time_min=time_min,
