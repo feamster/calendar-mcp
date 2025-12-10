@@ -876,35 +876,50 @@ class CalendarClient:
         location: Optional[str] = None,
         attendees: Optional[List[str]] = None,
         send_notifications: bool = True,
-        calendar_id: str = 'primary'
+        calendar_id: str = 'primary',
+        all_day: bool = False
     ) -> Dict[str, Any]:
         """Create a new calendar event.
 
         Args:
             summary: Event title
-            start: Event start time
-            end: Event end time
+            start: Event start time (for all-day events, time portion is ignored)
+            end: Event end time (for all-day events, this is exclusive - event runs until start of this day)
             description: Event description
             location: Event location
             attendees: List of attendee email addresses
             send_notifications: Whether to send email invitations to attendees
             calendar_id: Calendar to create event in (default: 'primary')
+            all_day: If True, creates an all-day event using date field (default: False)
 
         Returns:
             Dictionary with created event details including event ID
         """
         # Build event object
         event = {
-            'summary': summary,
-            'start': {
+            'summary': summary
+        }
+
+        # Handle all-day vs timed events
+        if all_day:
+            # For all-day events, use date field (YYYY-MM-DD format)
+            # Note: end date is exclusive in Google Calendar
+            event['start'] = {
+                'date': start.date().isoformat()
+            }
+            event['end'] = {
+                'date': end.date().isoformat()
+            }
+        else:
+            # For timed events, use dateTime field
+            event['start'] = {
                 'dateTime': start.isoformat(),
                 'timeZone': str(start.tzinfo) if start.tzinfo else 'UTC'
-            },
-            'end': {
+            }
+            event['end'] = {
                 'dateTime': end.isoformat(),
                 'timeZone': str(end.tzinfo) if end.tzinfo else 'UTC'
             }
-        }
 
         if description:
             event['description'] = description

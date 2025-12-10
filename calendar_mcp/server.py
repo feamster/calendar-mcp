@@ -133,13 +133,14 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "summary": {"type": "string", "description": "Event title"},
-                "start": {"type": "string", "description": "Start time (ISO format)"},
-                "end": {"type": "string", "description": "End time (ISO format)"},
+                "start": {"type": "string", "description": "Start time (ISO format). For all-day events, use YYYY-MM-DD."},
+                "end": {"type": "string", "description": "End time (ISO format). For all-day events, use YYYY-MM-DD (exclusive - event runs until start of this day)."},
                 "description": {"type": "string", "description": "Event description"},
                 "location": {"type": "string", "description": "Event location"},
                 "attendees": {"type": "array", "items": {"type": "string"}, "description": "List of attendee email addresses"},
                 "sendNotifications": {"type": "boolean", "description": "Send email invitations (default: true)", "default": True},
-                "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"}
+                "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"},
+                "allDay": {"type": "boolean", "description": "Create as all-day event (default: false)", "default": False}
             },
             "required": ["summary", "start", "end"]
         }
@@ -435,6 +436,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             attendees = arguments.get('attendees')
             send_notifications = arguments.get('sendNotifications', True)
             calendar_id = arguments.get('calendarId', 'primary')
+            all_day = arguments.get('allDay', False)
 
             if not summary or not start_str or not end_str:
                 return [TextContent(
@@ -445,13 +447,25 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 )]
 
             try:
-                start = datetime.fromisoformat(start_str)
-                end = datetime.fromisoformat(end_str)
+                # For all-day events, accept date-only format (YYYY-MM-DD)
+                # For timed events, require full ISO datetime
+                if all_day:
+                    # Parse as date and create datetime at midnight UTC
+                    try:
+                        start = datetime.strptime(start_str, '%Y-%m-%d').replace(tzinfo=ZoneInfo("UTC"))
+                        end = datetime.strptime(end_str, '%Y-%m-%d').replace(tzinfo=ZoneInfo("UTC"))
+                    except ValueError:
+                        # Try full datetime format as fallback
+                        start = datetime.fromisoformat(start_str)
+                        end = datetime.fromisoformat(end_str)
+                else:
+                    start = datetime.fromisoformat(start_str)
+                    end = datetime.fromisoformat(end_str)
             except ValueError:
                 return [TextContent(
                     type="text",
                     text=json.dumps({
-                        'error': 'Invalid datetime format. Use ISO format'
+                        'error': 'Invalid datetime format. Use ISO format (YYYY-MM-DD for all-day events)'
                     })
                 )]
 
@@ -463,7 +477,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 location=location,
                 attendees=attendees,
                 send_notifications=send_notifications,
-                calendar_id=calendar_id
+                calendar_id=calendar_id,
+                all_day=all_day
             )
 
             return [TextContent(
