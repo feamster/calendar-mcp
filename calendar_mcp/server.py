@@ -233,21 +233,21 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             # Parse start date (default: now)
             if start_date_str:
                 try:
-                    # Try ISO format first
-                    if 'T' in start_date_str:
-                        time_min = datetime.fromisoformat(start_date_str)
-                        if time_min.tzinfo is None:
-                            time_min = time_min.replace(tzinfo=ZoneInfo("UTC"))
-                    else:
-                        # YYYY-MM-DD format - start of day
-                        time_min = datetime.strptime(start_date_str, "%Y-%m-%d").replace(
-                            tzinfo=ZoneInfo("UTC")
-                        )
+                    # Try parsing as datetime first (handles both ISO and date-only)
+                    try:
+                        time_min = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
+                    except ValueError:
+                        # Fall back to date-only parsing
+                        time_min = datetime.strptime(start_date_str, "%Y-%m-%d")
+
+                    # Ensure timezone is set (default to UTC if naive)
+                    if time_min.tzinfo is None:
+                        time_min = time_min.replace(tzinfo=ZoneInfo("UTC"))
                 except ValueError:
                     return [TextContent(
                         type="text",
                         text=json.dumps({
-                            'error': 'Invalid startDate format. Use YYYY-MM-DD or ISO format'
+                            'error': f'Invalid startDate format: {start_date_str}. Use YYYY-MM-DD or ISO format'
                         })
                     )]
             else:
@@ -256,20 +256,23 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             # Parse end date (default: startDate + days)
             if end_date_str:
                 try:
-                    if 'T' in end_date_str:
-                        time_max = datetime.fromisoformat(end_date_str)
-                        if time_max.tzinfo is None:
-                            time_max = time_max.replace(tzinfo=ZoneInfo("UTC"))
-                    else:
-                        # YYYY-MM-DD format - end of day
+                    # Try parsing as datetime first
+                    try:
+                        time_max = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                    except ValueError:
+                        # Fall back to date-only parsing (end of day for inclusive range)
                         time_max = datetime.strptime(end_date_str, "%Y-%m-%d").replace(
-                            hour=23, minute=59, second=59, tzinfo=ZoneInfo("UTC")
+                            hour=23, minute=59, second=59
                         )
+
+                    # Ensure timezone is set (default to UTC if naive)
+                    if time_max.tzinfo is None:
+                        time_max = time_max.replace(tzinfo=ZoneInfo("UTC"))
                 except ValueError:
                     return [TextContent(
                         type="text",
                         text=json.dumps({
-                            'error': 'Invalid endDate format. Use YYYY-MM-DD or ISO format'
+                            'error': f'Invalid endDate format: {end_date_str}. Use YYYY-MM-DD or ISO format'
                         })
                     )]
             else:

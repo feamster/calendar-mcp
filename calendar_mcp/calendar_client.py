@@ -96,6 +96,7 @@ class CalendarClient:
         all_events = []
 
         # Query each calendar
+        errors = []
         for calendar_id in calendar_ids:
             try:
                 events_result = self.service.events().list(
@@ -118,8 +119,15 @@ class CalendarClient:
 
                 all_events.extend(events)
 
-            except HttpError:
-                # Skip calendars we can't access
+            except HttpError as e:
+                # Log the error but continue with other calendars
+                error_details = {
+                    'calendar_id': calendar_id,
+                    'calendar_name': self._get_calendar_name(calendar_id),
+                    'error': str(e),
+                    'reason': e.resp.reason if hasattr(e, 'resp') else 'Unknown'
+                }
+                errors.append(error_details)
                 continue
 
         # Filter out declined events if requested
@@ -135,11 +143,18 @@ class CalendarClient:
         # Limit total results
         all_events = all_events[:max_results]
 
-        return {
+        result = {
             'events': [self._format_event(e) for e in all_events],
             'total': len(all_events),
             'calendars_queried': len(calendar_ids)
         }
+
+        # Include errors if any occurred
+        if errors:
+            result['errors'] = errors
+            result['calendars_with_errors'] = len(errors)
+
+        return result
 
     def _get_calendar_name(self, calendar_id: str) -> str:
         """Get calendar name from ID."""
