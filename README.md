@@ -5,7 +5,8 @@ MCP server for accessing and analyzing Google Calendar events through the Model 
 ## Features
 
 - 📅 **Access ALL your calendars** - Primary, work, shared calendars, everything!
-- ➕ **Create calendar events** - Schedule meetings with attendees and send invitations
+- 👥 **Multi-account support** - Use multiple Google accounts (e.g., personal + work) with automatic account selection
+- ➕ **Create calendar events** - Schedule meetings with invites coming from the correct account
 - ✅ **Accept/decline invitations** - Respond to calendar invites
 - 🗑️ **Delete events** - Remove calendar entries
 - 🔍 Find when you last met with someone
@@ -88,12 +89,45 @@ python -m calendar_mcp.auth
 This will:
 - Open your browser for Google OAuth consent
 - Ask you to grant Calendar read and write permissions
-- Save the refresh token to `~/.config/calendar-mcp/credentials.json`
+- Save the refresh token to `~/.config/calendar-mcp/tokens/`
 
 **Important:** Google will show a warning "Google hasn't verified this app" because this is your personal project. This is normal and safe:
 - Click "Advanced"
 - Click "Go to Calendar MCP (unsafe)"
 - Grant the calendar read and write permissions
+
+### 4b. Multi-Account Setup (Optional)
+
+To use multiple Google accounts (e.g., personal + work), add each account:
+
+```bash
+# Add your first account
+python -m calendar_mcp.auth add feamster@gmail.com
+
+# Add your work account and set as default
+python -m calendar_mcp.auth add feamster@uchicago.edu --default
+
+# List configured accounts
+python -m calendar_mcp.auth list
+
+# Change default account
+python -m calendar_mcp.auth default feamster@uchicago.edu
+```
+
+**How multi-account works:**
+- When creating events, the account is **automatically selected** based on the `calendarId`
+- If `calendarId="feamster@uchicago.edu"`, invites come FROM that account
+- If `calendarId="feamster@gmail.com"`, invites come FROM that account
+- You can also explicitly specify `account` parameter to override
+
+**Example usage after setup:**
+```
+# Creates event on UChicago calendar, invite FROM feamster@uchicago.edu
+create_event(summary="Meeting", calendarId="feamster@uchicago.edu", attendees=["someone@example.com"])
+
+# Creates event on Gmail calendar, invite FROM feamster@gmail.com
+create_event(summary="Personal", calendarId="feamster@gmail.com", attendees=["friend@example.com"])
+```
 
 ### 5. Configure Meeting Preferences (Optional)
 
@@ -229,40 +263,43 @@ If you have both calendar-mcp and spark-mcp installed:
 
 ## Available Tools
 
-### 1. `list_all_calendars`
+### 1. `list_accounts`
+List all configured Google accounts for multi-account calendar access. Shows which accounts are set up and which is the default.
+
+### 2. `list_all_calendars`
 List all calendars you have access to (primary, work, shared, etc.)
 
-### 2. `list_calendar_events`
+### 3. `list_calendar_events`
 List calendar events **from ALL your calendars** with filtering by time range, search query, etc. Each event shows which calendar it's from.
 
-### 3. `get_upcoming_meetings`
+### 4. `get_upcoming_meetings`
 Get upcoming meetings for preparation, includes time until meeting and attendee info.
 
-### 4. `find_meetings_with_person`
+### 5. `find_meetings_with_person`
 Find when you last met with someone (by email or name).
 
-### 5. `get_meeting_by_id`
+### 6. `get_meeting_by_id`
 Get full details of a specific calendar event.
 
-### 6. `analyze_time_blocks`
+### 7. `analyze_time_blocks`
 Analyze calendar blocks and distinguish between deep work and flexible time.
 
-### 7. `summarize_meetings`
+### 8. `summarize_meetings`
 Get summaries of meetings grouped by day, week, or person.
 
-### 8. `check_availability`
+### 9. `check_availability`
 Check if you're available at a proposed time.
 
-### 9. `find_meeting_times`
+### 10. `find_meeting_times`
 Find best available meeting times based on your preferences (day ranking, adjacent to meetings, avoid deep work).
 
-### 10. `create_event`
-Create a new calendar event with optional attendees and automatic invitation emails.
+### 11. `create_event`
+Create a new calendar event with optional attendees and automatic invitation emails. **Multi-account:** Automatically selects the correct Google account based on `calendarId`.
 
-### 11. `delete_event`
+### 12. `delete_event`
 Delete a calendar event with optional cancellation notifications to attendees.
 
-### 12. `respond_to_event`
+### 13. `respond_to_event`
 Accept, decline, or tentatively accept a calendar invitation.
 
 ## Block Type Detection
@@ -373,7 +410,7 @@ pip install -e .
 calendar-mcp/
 ├── calendar_mcp/
 │   ├── __init__.py
-│   ├── auth.py              # OAuth2 authentication
+│   ├── auth.py              # OAuth2 authentication (multi-account support)
 │   ├── calendar_client.py   # Google Calendar API wrapper
 │   └── server.py            # MCP server implementation
 ├── test_calendar.py         # Test script
@@ -384,7 +421,12 @@ calendar-mcp/
 └── SPEC.md                 # Technical specification
 
 ~/.config/calendar-mcp/
-└── credentials.json         # OAuth tokens (auto-created)
+├── accounts.json            # Multi-account configuration
+├── config.json              # User preferences
+├── credentials.json         # Legacy single-account token
+└── tokens/                  # Per-account OAuth tokens
+    ├── feamster_at_gmail_com.json
+    └── feamster_at_uchicago_edu.json
 ```
 
 ## Privacy & Security

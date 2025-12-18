@@ -29,6 +29,11 @@ server = Server("calendar-mcp-server")
 # Define tools - minimal descriptions following spark-mcp best practices
 TOOLS: list[Tool] = [
     Tool(
+        name="list_accounts",
+        description="List configured Google accounts for multi-account calendar access",
+        inputSchema={"type": "object", "properties": {}}
+    ),
+    Tool(
         name="list_all_calendars",
         description="List all calendars",
         inputSchema={"type": "object", "properties": {}}
@@ -128,7 +133,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="create_event",
-        description="Create a new calendar event with optional attendees/invitations",
+        description="Create a new calendar event with optional attendees/invitations. Account is auto-selected from calendarId.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -139,8 +144,9 @@ TOOLS: list[Tool] = [
                 "location": {"type": "string", "description": "Event location"},
                 "attendees": {"type": "array", "items": {"type": "string"}, "description": "List of attendee email addresses"},
                 "sendNotifications": {"type": "boolean", "description": "Send email invitations (default: true)", "default": True},
-                "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"},
-                "allDay": {"type": "boolean", "description": "Create as all-day event (default: false)", "default": False}
+                "calendarId": {"type": "string", "description": "Calendar ID - use email to auto-select account (e.g., feamster@uchicago.edu)", "default": "primary"},
+                "allDay": {"type": "boolean", "description": "Create as all-day event (default: false)", "default": False},
+                "account": {"type": "string", "description": "Google account to use (auto-inferred from calendarId if not specified)"}
             },
             "required": ["summary", "start", "end"]
         }
@@ -153,7 +159,8 @@ TOOLS: list[Tool] = [
             "properties": {
                 "eventId": {"type": "string", "description": "Event ID to delete"},
                 "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"},
-                "sendNotifications": {"type": "boolean", "description": "Send cancellation emails (default: true)", "default": True}
+                "sendNotifications": {"type": "boolean", "description": "Send cancellation emails (default: true)", "default": True},
+                "account": {"type": "string", "description": "Google account to use (auto-inferred from calendarId if not specified)"}
             },
             "required": ["eventId"]
         }
@@ -168,7 +175,8 @@ TOOLS: list[Tool] = [
                 "response": {"type": "string", "description": "Response: 'accepted', 'declined', or 'tentative'", "enum": ["accepted", "declined", "tentative"]},
                 "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"},
                 "comment": {"type": "string", "description": "Optional comment with response"},
-                "respondToSeries": {"type": "boolean", "description": "If true and event is recurring, respond to ALL instances (default: false)", "default": False}
+                "respondToSeries": {"type": "boolean", "description": "If true and event is recurring, respond to ALL instances (default: false)", "default": False},
+                "account": {"type": "string", "description": "Google account to use (auto-inferred from calendarId if not specified)"}
             },
             "required": ["eventId", "response"]
         }
@@ -181,7 +189,8 @@ TOOLS: list[Tool] = [
             "properties": {
                 "response": {"type": "string", "description": "Response: 'accepted', 'declined', or 'tentative'", "enum": ["accepted", "declined", "tentative"]},
                 "daysAhead": {"type": "number", "description": "Days ahead to look for pending invitations (default: 90)", "default": 90},
-                "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"}
+                "calendarId": {"type": "string", "description": "Calendar ID (default: primary)", "default": "primary"},
+                "account": {"type": "string", "description": "Google account to use (auto-inferred from calendarId if not specified)"}
             },
             "required": ["response"]
         }
@@ -199,7 +208,23 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     """Handle tool calls."""
     try:
-        if name == "list_all_calendars":
+        if name == "list_accounts":
+            accounts = calendar.get_configured_accounts()
+            default = calendar.get_default_account()
+
+            result = {
+                'accounts': accounts,
+                'default': default,
+                'total': len(accounts),
+                'message': f"{len(accounts)} account(s) configured" + (f", default: {default}" if default else "")
+            }
+
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "list_all_calendars":
             calendars = calendar.get_all_calendars()
 
             result = {
@@ -440,6 +465,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             send_notifications = arguments.get('sendNotifications', True)
             calendar_id = arguments.get('calendarId', 'primary')
             all_day = arguments.get('allDay', False)
+            account = arguments.get('account')  # Optional account override
 
             if not summary or not start_str or not end_str:
                 return [TextContent(
@@ -481,7 +507,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 attendees=attendees,
                 send_notifications=send_notifications,
                 calendar_id=calendar_id,
-                all_day=all_day
+                all_day=all_day,
+                account=account
             )
 
             return [TextContent(
@@ -493,6 +520,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             event_id = arguments.get('eventId')
             calendar_id = arguments.get('calendarId', 'primary')
             send_notifications = arguments.get('sendNotifications', True)
+            account = arguments.get('account')
 
             if not event_id:
                 return [TextContent(
@@ -503,7 +531,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             result = calendar.delete_event(
                 event_id=event_id,
                 calendar_id=calendar_id,
-                send_notifications=send_notifications
+                send_notifications=send_notifications,
+                account=account
             )
 
             return [TextContent(
@@ -517,6 +546,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             calendar_id = arguments.get('calendarId', 'primary')
             comment = arguments.get('comment')
             respond_to_series = arguments.get('respondToSeries', False)
+            account = arguments.get('account')
 
             if not event_id or not response:
                 return [TextContent(
@@ -531,7 +561,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 response=response,
                 calendar_id=calendar_id,
                 comment=comment,
-                respond_to_series=respond_to_series
+                respond_to_series=respond_to_series,
+                account=account
             )
 
             return [TextContent(
@@ -543,6 +574,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             response = arguments.get('response')
             days_ahead = arguments.get('daysAhead', 90)
             calendar_id = arguments.get('calendarId', 'primary')
+            account = arguments.get('account')
 
             if not response:
                 return [TextContent(
@@ -553,7 +585,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             result = calendar.respond_to_pending_invitations(
                 response=response,
                 days_ahead=days_ahead,
-                calendar_id=calendar_id
+                calendar_id=calendar_id,
+                account=account
             )
 
             return [TextContent(

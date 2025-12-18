@@ -1,4 +1,4 @@
-"""Google Calendar API client wrapper."""
+"""Google Calendar API client wrapper with multi-account support."""
 
 import json
 from datetime import datetime, timedelta
@@ -8,26 +8,131 @@ from zoneinfo import ZoneInfo
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from .auth import get_credentials
+from .auth import (
+    get_credentials,
+    get_credentials_for_account,
+    get_configured_accounts,
+    get_default_account,
+    load_accounts_config
+)
 import json
 from pathlib import Path
 
 
 class CalendarClient:
-    """Client for Google Calendar API operations."""
+    """Client for Google Calendar API operations with multi-account support."""
 
     def __init__(self):
         """Initialize Calendar API client."""
-        creds = get_credentials()
-        if not creds:
-            raise ValueError(
-                "No valid credentials found. "
-                "Please run: python -m calendar_mcp.auth"
-            )
+        # Multi-account support: store services per account
+        self._services: Dict[str, Any] = {}
+        self._default_service = None
 
-        self.service = build('calendar', 'v3', credentials=creds)
+        # Try to initialize with configured accounts
+        accounts = get_configured_accounts()
+        default_account = get_default_account()
+
+        if accounts:
+            # Initialize services for all configured accounts
+            for email in accounts:
+                creds = get_credentials_for_account(email)
+                if creds:
+                    self._services[email] = build('calendar', 'v3', credentials=creds)
+
+            # Set default service
+            if default_account and default_account in self._services:
+                self._default_service = self._services[default_account]
+            elif self._services:
+                # Use first available service as default
+                self._default_service = next(iter(self._services.values()))
+
+        # Fall back to legacy single-account if no multi-account setup
+        if not self._default_service:
+            creds = get_credentials()
+            if not creds:
+                raise ValueError(
+                    "No valid credentials found. "
+                    "Please run: python -m calendar_mcp.auth"
+                )
+            self._default_service = build('calendar', 'v3', credentials=creds)
+
+        # For backwards compatibility
+        self.service = self._default_service
+
         self._calendars_cache = None
+        self._calendars_cache_by_account: Dict[str, List[Dict]] = {}
         self._config = self._load_config()
+
+    def _get_service_for_account(self, account: Optional[str] = None) -> Any:
+        """Get the Google Calendar service for a specific account.
+
+        Args:
+            account: Account email. If None, uses default account.
+
+        Returns:
+            Google Calendar API service object
+        """
+        if account and account in self._services:
+            return self._services[account]
+        return self._default_service
+
+    def _infer_account_from_calendar_id(self, calendar_id: str) -> Optional[str]:
+        """Infer which account to use based on calendar ID.
+
+        If the calendar_id looks like an email and matches a configured account,
+        use that account's credentials.
+
+        Args:
+            calendar_id: The calendar ID (could be 'primary', an email, or other ID)
+
+        Returns:
+            Account email if inferred, None otherwise
+        """
+        if not calendar_id or calendar_id == 'primary':
+            return None
+
+        # Check if calendar_id is an email that matches a configured account
+        calendar_id_lower = calendar_id.lower()
+        for account in self._services.keys():
+            if account.lower() == calendar_id_lower:
+                return account
+
+        return None
+
+    def _get_service_for_calendar(self, calendar_id: str, account: Optional[str] = None) -> Any:
+        """Get the appropriate service for a calendar operation.
+
+        Priority:
+        1. Explicit account parameter
+        2. Inferred from calendar_id
+        3. Default account
+
+        Args:
+            calendar_id: The calendar ID
+            account: Explicit account override
+
+        Returns:
+            Google Calendar API service object
+        """
+        # Explicit account takes priority
+        if account:
+            return self._get_service_for_account(account)
+
+        # Try to infer from calendar_id
+        inferred = self._infer_account_from_calendar_id(calendar_id)
+        if inferred:
+            return self._get_service_for_account(inferred)
+
+        # Fall back to default
+        return self._default_service
+
+    def get_configured_accounts(self) -> List[str]:
+        """Get list of configured accounts."""
+        return list(self._services.keys())
+
+    def get_default_account(self) -> Optional[str]:
+        """Get the default account email."""
+        return get_default_account()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load user preferences from config file."""
@@ -892,7 +997,8 @@ class CalendarClient:
         attendees: Optional[List[str]] = None,
         send_notifications: bool = True,
         calendar_id: str = 'primary',
-        all_day: bool = False
+        all_day: bool = False,
+        account: Optional[str] = None
     ) -> Dict[str, Any]:
         """Create a new calendar event.
 
@@ -906,10 +1012,14 @@ class CalendarClient:
             send_notifications: Whether to send email invitations to attendees
             calendar_id: Calendar to create event in (default: 'primary')
             all_day: If True, creates an all-day event using date field (default: False)
+            account: Google account to use (auto-inferred from calendar_id if not specified)
 
         Returns:
             Dictionary with created event details including event ID
         """
+        # Get the appropriate service (auto-infers account from calendar_id)
+        service = self._get_service_for_calendar(calendar_id, account)
+
         # Build event object
         event = {
             'summary': summary
@@ -946,11 +1056,14 @@ class CalendarClient:
             event['attendees'] = [{'email': email} for email in attendees]
 
         # Create the event
-        created_event = self.service.events().insert(
+        created_event = service.events().insert(
             calendarId=calendar_id,
             body=event,
             sendUpdates='all' if send_notifications else 'none'
         ).execute()
+
+        # Determine which account was used
+        used_account = account or self._infer_account_from_calendar_id(calendar_id) or get_default_account()
 
         return {
             'success': True,
@@ -967,14 +1080,16 @@ class CalendarClient:
                 for att in created_event.get('attendees', [])
             ] if attendees else [],
             'created': created_event.get('created'),
-            'message': f"Event '{summary}' created successfully"
+            'organizer_account': used_account,
+            'message': f"Event '{summary}' created successfully" + (f" (organizer: {used_account})" if used_account else "")
         }
 
     def delete_event(
         self,
         event_id: str,
         calendar_id: str = 'primary',
-        send_notifications: bool = True
+        send_notifications: bool = True,
+        account: Optional[str] = None
     ) -> Dict[str, Any]:
         """Delete a calendar event.
 
@@ -982,13 +1097,17 @@ class CalendarClient:
             event_id: ID of the event to delete
             calendar_id: Calendar containing the event (default: 'primary')
             send_notifications: Whether to send cancellation emails to attendees
+            account: Google account to use (auto-inferred from calendar_id if not specified)
 
         Returns:
             Dictionary with success status
         """
+        # Get the appropriate service
+        service = self._get_service_for_calendar(calendar_id, account)
+
         try:
             # Get event details before deleting (for response message)
-            event = self.service.events().get(
+            event = service.events().get(
                 calendarId=calendar_id,
                 eventId=event_id
             ).execute()
@@ -996,7 +1115,7 @@ class CalendarClient:
             event_summary = event.get('summary', 'Untitled Event')
 
             # Delete the event
-            self.service.events().delete(
+            service.events().delete(
                 calendarId=calendar_id,
                 eventId=event_id,
                 sendUpdates='all' if send_notifications else 'none'
@@ -1020,7 +1139,8 @@ class CalendarClient:
         response: str,
         calendar_id: str = 'primary',
         comment: Optional[str] = None,
-        respond_to_series: bool = False
+        respond_to_series: bool = False,
+        account: Optional[str] = None
     ) -> Dict[str, Any]:
         """Respond to a calendar event invitation (accept/decline/tentative).
 
@@ -1030,10 +1150,14 @@ class CalendarClient:
             calendar_id: Calendar containing the event (default: 'primary')
             comment: Optional comment to include with response
             respond_to_series: If True and event is recurring, respond to all instances (default: False)
+            account: Google account to use (auto-inferred from calendar_id if not specified)
 
         Returns:
             Dictionary with success status and updated event details
         """
+        # Get the appropriate service
+        service = self._get_service_for_calendar(calendar_id, account)
+
         valid_responses = ['accepted', 'declined', 'tentative']
         if response.lower() not in valid_responses:
             return {
@@ -1043,7 +1167,7 @@ class CalendarClient:
 
         try:
             # Get the event
-            event = self.service.events().get(
+            event = service.events().get(
                 calendarId=calendar_id,
                 eventId=event_id
             ).execute()
@@ -1057,7 +1181,7 @@ class CalendarClient:
             if respond_to_series and is_recurring:
                 target_event_id = recurring_event_id
                 # Get the recurring event (master)
-                event = self.service.events().get(
+                event = service.events().get(
                     calendarId=calendar_id,
                     eventId=target_event_id
                 ).execute()
@@ -1083,7 +1207,7 @@ class CalendarClient:
                 }
 
             # Update the event
-            updated_event = self.service.events().update(
+            updated_event = service.events().update(
                 calendarId=calendar_id,
                 eventId=target_event_id,
                 body=event
@@ -1113,7 +1237,8 @@ class CalendarClient:
         self,
         response: str,
         days_ahead: int = 90,
-        calendar_id: str = 'primary'
+        calendar_id: str = 'primary',
+        account: Optional[str] = None
     ) -> Dict[str, Any]:
         """Respond to all pending calendar invitations at once.
 
@@ -1121,10 +1246,14 @@ class CalendarClient:
             response: Response status - 'accepted', 'declined', or 'tentative'
             days_ahead: How many days ahead to look for pending invitations (default: 90)
             calendar_id: Calendar to check (default: 'primary')
+            account: Google account to use (auto-inferred from calendar_id if not specified)
 
         Returns:
             Dictionary with list of updated events and summary
         """
+        # Get the appropriate service
+        service = self._get_service_for_calendar(calendar_id, account)
+
         valid_responses = ['accepted', 'declined', 'tentative']
         if response.lower() not in valid_responses:
             return {
@@ -1173,7 +1302,7 @@ class CalendarClient:
 
                 try:
                     # Get full event details and update
-                    full_event = self.service.events().get(
+                    full_event = service.events().get(
                         calendarId=calendar_id,
                         eventId=event_id
                     ).execute()
@@ -1186,7 +1315,7 @@ class CalendarClient:
                             break
 
                     # Update the event
-                    updated_event = self.service.events().update(
+                    updated_event = service.events().update(
                         calendarId=calendar_id,
                         eventId=event_id,
                         body=full_event
