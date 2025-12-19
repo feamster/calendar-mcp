@@ -7,7 +7,14 @@
       "Bash(python3:*)",
       "Bash(gh repo list:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(__NEW_LINE__ cd /Users/feamster/src/spark-mcp)",
+      "Bash(__NEW_LINE__ cd /Users/feamster/src/paymo-mcp)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(source ~/.zshrc)"
     ]
   }
 }

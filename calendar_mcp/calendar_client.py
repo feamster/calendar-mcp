@@ -136,7 +136,7 @@ class CalendarClient:
 
     def _load_config(self) -> Dict[str, Any]:
         """Load user preferences from config file."""
-        config_path = Path.home() / ".config" / "calendar-mcp" / "config.json"
+        config_path = Path.home() / ".mcp-config" / "calendar" / "config.json"
         if config_path.exists():
             try:
                 with open(config_path) as f:

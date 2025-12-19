@@ -14,22 +14,30 @@ from googleapiclient.discovery import build
 # Calendar scopes - full access for read/write/respond to events
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
-# Config directory
-CONFIG_DIR = Path.home() / ".config" / "calendar-mcp"
-TOKENS_DIR = CONFIG_DIR / "tokens"
-CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"  # Legacy single-account file
-ACCOUNTS_CONFIG_FILE = CONFIG_DIR / "accounts.json"
+# Config directories - split between non-sensitive config and auth
+MCP_CONFIG_DIR = Path.home() / ".mcp-config" / "calendar"
+MCP_AUTH_DIR = Path.home() / ".mcp-auth" / "calendar"
+TOKENS_DIR = MCP_AUTH_DIR / "tokens"
+CREDENTIALS_FILE = MCP_AUTH_DIR / "credentials.json"  # Legacy single-account file
+ACCOUNTS_CONFIG_FILE = MCP_CONFIG_DIR / "accounts.json"
 CLIENT_SECRET_FILE = Path("client_secret.json")
 
 
 def get_config_dir() -> Path:
     """Ensure config directory exists."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return CONFIG_DIR
+    MCP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    return MCP_CONFIG_DIR
+
+
+def get_auth_dir() -> Path:
+    """Ensure auth directory exists."""
+    MCP_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    return MCP_AUTH_DIR
 
 
 def get_tokens_dir() -> Path:
     """Ensure tokens directory exists."""
+    get_auth_dir()  # Ensure parent exists
     TOKENS_DIR.mkdir(parents=True, exist_ok=True)
     return TOKENS_DIR
 
@@ -204,8 +212,8 @@ def load_credentials() -> Optional[Credentials]:
 
 
 def save_credentials(creds: Credentials):
-    """Save credentials to config directory (legacy single-account)."""
-    get_config_dir()
+    """Save credentials to auth directory (legacy single-account)."""
+    get_auth_dir()
 
     creds_data = {
         'token': creds.token,
