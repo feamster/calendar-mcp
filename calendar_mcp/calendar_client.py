@@ -145,6 +145,10 @@ class CalendarClient:
                 return {}
         return {}
 
+    def _get_ignored_calendars_for_availability(self) -> List[str]:
+        """Get list of calendar IDs to ignore when checking availability."""
+        return self._config.get('ignore_calendars_for_availability', [])
+
     def get_all_calendars(self) -> List[Dict[str, Any]]:
         """Get list of all calendars user has access to.
 
@@ -595,6 +599,14 @@ class CalendarClient:
 
         conflicts = result['events']
 
+        # Filter out events from ignored calendars (e.g., seminars, holidays)
+        ignored_calendars = self._get_ignored_calendars_for_availability()
+        if ignored_calendars:
+            conflicts = [
+                c for c in conflicts
+                if c.get('calendarId') not in ignored_calendars
+            ]
+
         # Filter out flexible blocks if requested
         if not respect_flexible:
             conflicts = [
@@ -765,6 +777,14 @@ class CalendarClient:
             return result
 
         events = result['events']
+
+        # Filter out events from ignored calendars (e.g., seminars, holidays)
+        ignored_calendars = self._get_ignored_calendars_for_availability()
+        if ignored_calendars:
+            events = [
+                e for e in events
+                if e.get('calendarId') not in ignored_calendars
+            ]
 
         # Filter out "never available" blocks
         def is_never_available(event):
