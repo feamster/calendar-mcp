@@ -89,7 +89,7 @@ python -m calendar_mcp.auth
 This will:
 - Open your browser for Google OAuth consent
 - Ask you to grant Calendar read and write permissions
-- Save the refresh token to `~/.config/calendar-mcp/tokens/`
+- Save the refresh token to `~/.mcp-auth/calendar/tokens/`
 
 **Important:** Google will show a warning "Google hasn't verified this app" because this is your personal project. This is normal and safe:
 - Click "Advanced"
@@ -131,7 +131,7 @@ create_event(summary="Personal", calendarId="feamster@gmail.com", attendees=["fr
 
 ### 5. Configure Meeting Preferences (Optional)
 
-Create `~/.config/calendar-mcp/config.json` to customize your scheduling preferences:
+Create `~/.mcp-config/calendar/config.json` to customize your scheduling preferences:
 
 ```json
 {
@@ -311,7 +311,7 @@ The server can distinguish between different types of calendar blocks:
 - **Meetings**: Scheduled meetings
 - **Out of Office**: Hard blocks
 
-Configure patterns in `~/.config/calendar-mcp/config.json`:
+Configure patterns in `~/.mcp-config/calendar/config.json`:
 
 ```json
 {
@@ -332,7 +332,7 @@ If you have spark-mcp installed, the calendar MCP can cross-reference calendar e
 
 1. Check credentials file exists:
    ```bash
-   ls ~/.config/calendar-mcp/credentials.json
+   ls ~/.mcp-auth/calendar/credentials.json
    ```
 
 2. Re-run authentication:
@@ -420,10 +420,12 @@ calendar-mcp/
 ├── QUICKSTART.md           # Quick start guide
 └── SPEC.md                 # Technical specification
 
-~/.config/calendar-mcp/
+~/.mcp-config/calendar/
 ├── accounts.json            # Multi-account configuration
-├── config.json              # User preferences
-├── credentials.json         # Legacy single-account token
+└── config.json              # User preferences (ignored calendars, meeting prefs)
+
+~/.mcp-auth/calendar/
+├── credentials.json         # OAuth client credentials
 └── tokens/                  # Per-account OAuth tokens
     ├── feamster_at_gmail_com.json
     └── feamster_at_uchicago_edu.json
@@ -432,7 +434,7 @@ calendar-mcp/
 ## Privacy & Security
 
 - **Full calendar access**: Requests `calendar` scope for read and write operations
-- **Local credentials**: Tokens stored locally in `~/.config/calendar-mcp/`
+- **Local credentials**: Tokens stored locally in `~/.mcp-auth/calendar/`
 - **No data caching**: Doesn't cache calendar data
 - **Secure token handling**: Automatic refresh token management
 - **Notification control**: You can disable email notifications when creating/deleting events
