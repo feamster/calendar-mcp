@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import sys
+import traceback
 from datetime import datetime, timedelta
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo
@@ -14,12 +16,16 @@ from mcp.server.stdio import stdio_server
 from .calendar_client import CalendarClient
 
 
-# Initialize calendar client (errors will be logged by MCP framework)
+# Initialize calendar client with detailed error handling
 try:
     calendar = CalendarClient()
-except Exception:
-    # Let MCP framework handle the error
-    raise
+except Exception as e:
+    # Log detailed error to stderr for debugging
+    error_msg = f"Failed to initialize CalendarClient: {str(e)}\n"
+    error_msg += f"Error type: {type(e).__name__}\n"
+    error_msg += f"Traceback:\n{traceback.format_exc()}"
+    print(error_msg, file=sys.stderr, flush=True)
+    raise RuntimeError(f"Calendar MCP initialization failed: {str(e)}") from e
 
 
 # Create server instance
@@ -133,7 +139,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="create_event",
-        description="Create a new calendar event with optional attendees/invitations. Account is auto-selected from calendarId.",
+        description="Create a new calendar event with optional attendees/invitations and optional recurrence. Account is auto-selected from calendarId.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -146,9 +152,44 @@ TOOLS: list[Tool] = [
                 "sendNotifications": {"type": "boolean", "description": "Send email invitations (default: true)", "default": True},
                 "calendarId": {"type": "string", "description": "Calendar ID - use email to auto-select account (e.g., feamster@uchicago.edu)", "default": "primary"},
                 "allDay": {"type": "boolean", "description": "Create as all-day event (default: false)", "default": False},
-                "account": {"type": "string", "description": "Google account to use (auto-inferred from calendarId if not specified)"}
+                "account": {"type": "string", "description": "Google account to use (auto-inferred from calendarId if not specified)"},
+                "recurrence": {
+                    "type": "object",
+                    "description": "Structured recurrence spec. Mutually exclusive with recurrenceRrule.",
+                    "properties": {
+                        "freq": {"type": "string", "enum": ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]},
+                        "interval": {"type": "integer", "minimum": 1, "default": 1},
+                        "by_day": {"type": "array", "items": {"type": "string", "enum": ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]}},
+                        "by_month_day": {"type": "array", "items": {"type": "integer"}},
+                        "by_month": {"type": "array", "items": {"type": "integer"}},
+                        "by_set_pos": {"type": "array", "items": {"type": "integer"}},
+                        "count": {"type": "integer", "minimum": 1},
+                        "until": {"type": "string", "description": "ISO date or datetime"},
+                        "exceptions": {"type": "array", "items": {"type": "string"}, "description": "Dates to skip (EXDATE)"}
+                    },
+                    "required": ["freq"]
+                },
+                "recurrenceRrule": {"type": "string", "description": "Raw RFC 5545 RRULE escape hatch, e.g. 'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10'"}
             },
             "required": ["summary", "start", "end"]
+        }
+    ),
+    Tool(
+        name="update_event_recurrence",
+        description="Modify the recurrence rule of an existing event. scope='series' replaces RRULE on the master; scope='this_and_following' splits the series at splitAt; scope='single' overrides one instance.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "eventId": {"type": "string", "description": "Master event id (or instance id for scope='single')"},
+                "calendarId": {"type": "string", "default": "primary"},
+                "account": {"type": "string"},
+                "recurrence": {"type": "object", "description": "New structured recurrence (omit to clear when scope='series')"},
+                "recurrenceRrule": {"type": "string", "description": "Raw RRULE escape hatch"},
+                "scope": {"type": "string", "enum": ["series", "this_and_following", "single"], "default": "series"},
+                "splitAt": {"type": "string", "description": "ISO datetime; required when scope='this_and_following'"},
+                "sendNotifications": {"type": "boolean", "default": True}
+            },
+            "required": ["eventId"]
         }
     ),
     Tool(
@@ -466,6 +507,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             calendar_id = arguments.get('calendarId', 'primary')
             all_day = arguments.get('allDay', False)
             account = arguments.get('account')  # Optional account override
+            recurrence = arguments.get('recurrence')
+            recurrence_rrule = arguments.get('recurrenceRrule')
 
             if not summary or not start_str or not end_str:
                 return [TextContent(
@@ -508,9 +551,33 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 send_notifications=send_notifications,
                 calendar_id=calendar_id,
                 all_day=all_day,
-                account=account
+                account=account,
+                recurrence=recurrence,
+                recurrence_rrule=recurrence_rrule,
             )
 
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "update_event_recurrence":
+            event_id = arguments.get('eventId')
+            if not event_id:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({'error': 'eventId is required'})
+                )]
+            result = calendar.update_event_recurrence(
+                event_id=event_id,
+                calendar_id=arguments.get('calendarId', 'primary'),
+                account=arguments.get('account'),
+                recurrence=arguments.get('recurrence'),
+                recurrence_rrule=arguments.get('recurrenceRrule'),
+                scope=arguments.get('scope', 'series'),
+                split_at=arguments.get('splitAt'),
+                send_notifications=arguments.get('sendNotifications', True),
+            )
             return [TextContent(
                 type="text",
                 text=json.dumps(result, indent=2)

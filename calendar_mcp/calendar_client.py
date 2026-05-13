@@ -2,9 +2,10 @@
 
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from dateutil.rrule import rrulestr
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -19,11 +20,238 @@ import json
 from pathlib import Path
 
 
+_WEEKDAY_CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+_VALID_WEEKDAYS = set(_WEEKDAY_CODES)
+_VALID_FREQS = {"DAILY", "WEEKLY", "MONTHLY", "YEARLY"}
+
+
+def _weekday_code(dt: datetime) -> str:
+    return _WEEKDAY_CODES[dt.weekday()]
+
+
+def _parse_until(until: str, start_dt: datetime, all_day: bool) -> datetime:
+    """Parse ``until`` value (ISO datetime or bare date) into a datetime.
+
+    Bare dates are interpreted as end-of-day (23:59:59) in ``start_dt``'s tz for
+    timed events, and as the literal date for all-day events.
+    """
+    # Detect bare-date form explicitly first — datetime.fromisoformat accepts
+    # "YYYY-MM-DD" (Py 3.11+) and would otherwise silently produce midnight,
+    # dropping the final instance of a series.
+    bare_date_re = (len(until) == 10 and until[4] == "-" and until[7] == "-")
+    if bare_date_re:
+        try:
+            d = datetime.strptime(until, "%Y-%m-%d")
+        except ValueError as e:
+            raise ValueError(f"recurrence.until invalid format: {until!r}") from e
+        if all_day:
+            return d.replace(tzinfo=start_dt.tzinfo) if start_dt.tzinfo else d
+        if start_dt.tzinfo:
+            return d.replace(hour=23, minute=59, second=59, tzinfo=start_dt.tzinfo)
+        return d.replace(hour=23, minute=59, second=59)
+
+    try:
+        dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise ValueError(f"recurrence.until invalid format: {until!r}") from e
+    if dt.tzinfo is None and start_dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=start_dt.tzinfo)
+    return dt
+
+
+def _format_until(until_dt: datetime, all_day: bool) -> str:
+    """Serialize UNTIL per RFC 5545: UTC Z form for timed, date form for all-day."""
+    if all_day:
+        return until_dt.strftime("%Y%m%d")
+    if until_dt.tzinfo is None:
+        return until_dt.strftime("%Y%m%dT%H%M%SZ")
+    return until_dt.astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _build_rrule(
+    spec: Dict[str, Any],
+    start_dt: datetime,
+    all_day: bool = False,
+) -> str:
+    """Build an RFC 5545 RRULE body (without the ``RRULE:`` prefix) from a
+    structured recurrence spec, validating the spec along the way.
+
+    Pure function — does no API calls. Designed for direct unit testing.
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("recurrence must be a dict")
+
+    freq = spec.get("freq")
+    if not freq:
+        raise ValueError("recurrence.freq is required")
+    freq = freq.upper()
+    if freq not in _VALID_FREQS:
+        raise ValueError(
+            f"recurrence.freq must be one of {sorted(_VALID_FREQS)}, got {freq!r}"
+        )
+
+    if spec.get("count") is not None and spec.get("until") is not None:
+        raise ValueError("recurrence: 'count' and 'until' are mutually exclusive")
+
+    by_day = spec.get("by_day")
+    if by_day is not None:
+        if not isinstance(by_day, list) or not by_day:
+            raise ValueError("recurrence.by_day must be a non-empty list")
+        by_day = [d.upper() for d in by_day]
+        bad = [d for d in by_day if d not in _VALID_WEEKDAYS]
+        if bad:
+            raise ValueError(
+                f"recurrence.by_day has invalid weekday codes: {bad}. "
+                f"Use {_WEEKDAY_CODES}."
+            )
+        if freq not in ("WEEKLY", "MONTHLY"):
+            raise ValueError(
+                "recurrence.by_day is only valid with freq=WEEKLY or MONTHLY"
+            )
+        if freq == "WEEKLY":
+            wk = _weekday_code(start_dt)
+            if wk not in by_day:
+                raise ValueError(
+                    f"recurrence.by_day={by_day} does not include start's weekday "
+                    f"({wk}). Google would silently include start as an extra "
+                    f"occurrence. Either change start to a day in by_day, or add "
+                    f"{wk!r} to by_day."
+                )
+
+    by_set_pos = spec.get("by_set_pos")
+    if by_set_pos is not None:
+        if not by_day:
+            raise ValueError("recurrence.by_set_pos requires by_day to be set")
+        if freq not in ("MONTHLY", "YEARLY"):
+            raise ValueError(
+                "recurrence.by_set_pos is typically only used with freq=MONTHLY or YEARLY"
+            )
+
+    count = spec.get("count")
+    if count is not None:
+        if not isinstance(count, int) or count <= 0:
+            raise ValueError("recurrence.count must be a positive integer")
+
+    interval = spec.get("interval", 1)
+    if not isinstance(interval, int) or interval < 1:
+        raise ValueError("recurrence.interval must be a positive integer")
+
+    until_str = None
+    if spec.get("until") is not None:
+        until_dt = _parse_until(spec["until"], start_dt, all_day)
+        if until_dt <= start_dt:
+            raise ValueError(
+                f"recurrence.until ({spec['until']!r}) must be strictly after "
+                f"start ({start_dt.isoformat()})"
+            )
+        until_str = _format_until(until_dt, all_day)
+
+    parts = [f"FREQ={freq}"]
+    if interval != 1:
+        parts.append(f"INTERVAL={interval}")
+    if by_day:
+        parts.append(f"BYDAY={','.join(by_day)}")
+    if spec.get("by_month_day"):
+        parts.append(f"BYMONTHDAY={','.join(str(d) for d in spec['by_month_day'])}")
+    if spec.get("by_month"):
+        parts.append(f"BYMONTH={','.join(str(m) for m in spec['by_month'])}")
+    if by_set_pos:
+        parts.append(f"BYSETPOS={','.join(str(p) for p in by_set_pos)}")
+    if count is not None:
+        parts.append(f"COUNT={count}")
+    if until_str:
+        parts.append(f"UNTIL={until_str}")
+
+    return ";".join(parts)
+
+
+def _build_exdate_line(
+    exceptions: List[str],
+    start_dt: datetime,
+    all_day: bool,
+) -> str:
+    """Build an EXDATE line excluding occurrences. Each entry must match the
+    instance's DTSTART representation — local time + TZID for timed events,
+    date-only for all-day events.
+    """
+    if not exceptions:
+        raise ValueError("exceptions list must not be empty")
+    if all_day:
+        formatted = []
+        for d in exceptions:
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d")
+            except ValueError as e:
+                raise ValueError(
+                    f"recurrence.exceptions entry {d!r} must be YYYY-MM-DD for all-day"
+                ) from e
+            formatted.append(dt.strftime("%Y%m%d"))
+        return f"EXDATE;VALUE=DATE:{','.join(formatted)}"
+
+    tz_name = _tz_name_for(start_dt)
+    formatted = []
+    start_time = start_dt.strftime("%H%M%S")
+    for d in exceptions:
+        is_bare_date = len(d) == 10 and d[4] == "-" and d[7] == "-"
+        if is_bare_date:
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d")
+            except ValueError as e:
+                raise ValueError(
+                    f"recurrence.exceptions entry {d!r} must be ISO datetime or YYYY-MM-DD"
+                ) from e
+            local = f"{dt.strftime('%Y%m%d')}T{start_time}"
+        else:
+            try:
+                dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
+            except ValueError as e:
+                raise ValueError(
+                    f"recurrence.exceptions entry {d!r} must be ISO datetime or YYYY-MM-DD"
+                ) from e
+            local = dt.strftime("%Y%m%dT%H%M%S")
+        formatted.append(local)
+    return f"EXDATE;TZID={tz_name}:{','.join(formatted)}"
+
+
+def _tz_name_for(dt: datetime) -> str:
+    """Return a TZ name suitable for Google Calendar / RFC 5545 TZID."""
+    tz = dt.tzinfo
+    if tz is None:
+        return "UTC"
+    if isinstance(tz, ZoneInfo):
+        return tz.key
+    # Fixed offset (e.g. parsed from ISO with -05:00) — fall back to UTC for TZID.
+    name = getattr(tz, "key", None) or str(tz)
+    return name
+
+
+def _count_occurrences(rrule_body: str, start_dt: datetime) -> Tuple[Optional[int], Optional[datetime], Optional[datetime]]:
+    """Expand RRULE locally and return (count, first, last). Returns (None, ...)
+    if the rule has no UNTIL/COUNT (infinite) or exceeds a sane cap.
+    """
+    cap = 10000
+    try:
+        rule = rrulestr(f"RRULE:{rrule_body}", dtstart=start_dt)
+    except Exception:
+        return (None, None, None)
+
+    occurrences: List[datetime] = []
+    for i, occ in enumerate(rule):
+        if i >= cap:
+            return (None, occurrences[0] if occurrences else None, None)
+        occurrences.append(occ)
+    if not occurrences:
+        return (0, None, None)
+    return (len(occurrences), occurrences[0], occurrences[-1])
+
+
 class CalendarClient:
     """Client for Google Calendar API operations with multi-account support."""
 
     def __init__(self):
         """Initialize Calendar API client."""
+        import sys
+
         # Multi-account support: store services per account
         self._services: Dict[str, Any] = {}
         self._default_service = None
@@ -32,12 +260,19 @@ class CalendarClient:
         accounts = get_configured_accounts()
         default_account = get_default_account()
 
+        failed_accounts = []
         if accounts:
             # Initialize services for all configured accounts
             for email in accounts:
-                creds = get_credentials_for_account(email)
-                if creds:
-                    self._services[email] = build('calendar', 'v3', credentials=creds)
+                try:
+                    creds = get_credentials_for_account(email)
+                    if creds:
+                        self._services[email] = build('calendar', 'v3', credentials=creds)
+                    else:
+                        failed_accounts.append(f"{email} (no valid credentials)")
+                except Exception as e:
+                    failed_accounts.append(f"{email} ({str(e)})")
+                    print(f"Warning: Failed to initialize account {email}: {e}", file=sys.stderr, flush=True)
 
             # Set default service
             if default_account and default_account in self._services:
@@ -50,10 +285,10 @@ class CalendarClient:
         if not self._default_service:
             creds = get_credentials()
             if not creds:
-                raise ValueError(
-                    "No valid credentials found. "
-                    "Please run: python -m calendar_mcp.auth"
-                )
+                error_msg = "No valid credentials found. Please run: python -m calendar_mcp.auth"
+                if failed_accounts:
+                    error_msg += f"\n\nFailed accounts: {', '.join(failed_accounts)}"
+                raise ValueError(error_msg)
             self._default_service = build('calendar', 'v3', credentials=creds)
 
         # For backwards compatibility
@@ -62,6 +297,12 @@ class CalendarClient:
         self._calendars_cache = None
         self._calendars_cache_by_account: Dict[str, List[Dict]] = {}
         self._config = self._load_config()
+
+        # Log successful initialization
+        if self._services:
+            print(f"Calendar MCP initialized with {len(self._services)} account(s): {', '.join(self._services.keys())}", file=sys.stderr, flush=True)
+            if failed_accounts:
+                print(f"Warning: Some accounts failed to initialize: {', '.join(failed_accounts)}", file=sys.stderr, flush=True)
 
     def _get_service_for_account(self, account: Optional[str] = None) -> Any:
         """Get the Google Calendar service for a specific account.
@@ -1018,9 +1259,11 @@ class CalendarClient:
         send_notifications: bool = True,
         calendar_id: str = 'primary',
         all_day: bool = False,
-        account: Optional[str] = None
+        account: Optional[str] = None,
+        recurrence: Optional[Dict[str, Any]] = None,
+        recurrence_rrule: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a new calendar event.
+        """Create a new calendar event, optionally recurring.
 
         Args:
             summary: Event title
@@ -1033,10 +1276,21 @@ class CalendarClient:
             calendar_id: Calendar to create event in (default: 'primary')
             all_day: If True, creates an all-day event using date field (default: False)
             account: Google account to use (auto-inferred from calendar_id if not specified)
+            recurrence: Structured recurrence spec — see ``_build_rrule``. Mutually
+                exclusive with ``recurrence_rrule``.
+            recurrence_rrule: Raw RRULE escape hatch, with or without the
+                ``RRULE:`` prefix (e.g. ``FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10``).
 
         Returns:
-            Dictionary with created event details including event ID
+            Dictionary with created event details including event ID. When the
+            event is recurring, includes a ``recurrence`` block with the
+            generated RRULE and locally-computed occurrence stats.
         """
+        if recurrence is not None and recurrence_rrule is not None:
+            raise ValueError(
+                "Provide either 'recurrence' or 'recurrence_rrule', not both"
+            )
+
         # Get the appropriate service (auto-infers account from calendar_id)
         service = self._get_service_for_calendar(calendar_id, account)
 
@@ -1075,6 +1329,22 @@ class CalendarClient:
         if attendees:
             event['attendees'] = [{'email': email} for email in attendees]
 
+        # Build recurrence array if requested
+        rrule_body: Optional[str] = None
+        exceptions: Optional[List[str]] = None
+        if recurrence is not None:
+            exceptions = recurrence.get("exceptions")
+            rrule_body = _build_rrule(recurrence, start, all_day=all_day)
+        elif recurrence_rrule is not None:
+            raw = recurrence_rrule.strip()
+            rrule_body = raw[6:] if raw.upper().startswith("RRULE:") else raw
+
+        if rrule_body:
+            recurrence_lines = [f"RRULE:{rrule_body}"]
+            if exceptions:
+                recurrence_lines.append(_build_exdate_line(exceptions, start, all_day))
+            event['recurrence'] = recurrence_lines
+
         # Create the event
         created_event = service.events().insert(
             calendarId=calendar_id,
@@ -1085,7 +1355,7 @@ class CalendarClient:
         # Determine which account was used
         used_account = account or self._infer_account_from_calendar_id(calendar_id) or get_default_account()
 
-        return {
+        response: Dict[str, Any] = {
             'success': True,
             'event_id': created_event['id'],
             'event_link': created_event.get('htmlLink'),
@@ -1103,6 +1373,30 @@ class CalendarClient:
             'organizer_account': used_account,
             'message': f"Event '{summary}' created successfully" + (f" (organizer: {used_account})" if used_account else "")
         }
+
+        if rrule_body:
+            occ_count, first_occ, last_occ = _count_occurrences(rrule_body, start)
+            if exceptions:
+                # Exclude EXDATE entries from the count.
+                excluded = set()
+                for d in exceptions:
+                    try:
+                        excluded.add(datetime.fromisoformat(d.replace("Z", "+00:00")).date())
+                    except ValueError:
+                        try:
+                            excluded.add(datetime.strptime(d, "%Y-%m-%d").date())
+                        except ValueError:
+                            pass
+                if occ_count is not None and excluded:
+                    occ_count = max(0, occ_count - len(excluded))
+            response['recurrence'] = {
+                'rrule': rrule_body,
+                'occurrence_count': occ_count,
+                'first_occurrence': first_occ.isoformat() if first_occ else None,
+                'last_occurrence': last_occ.isoformat() if last_occ else None,
+            }
+
+        return response
 
     def delete_event(
         self,
@@ -1152,6 +1446,209 @@ class CalendarClient:
                 'error': str(e),
                 'message': f"Failed to delete event: {str(e)}"
             }
+
+    def update_event_recurrence(
+        self,
+        event_id: str,
+        calendar_id: str = 'primary',
+        account: Optional[str] = None,
+        recurrence: Optional[Dict[str, Any]] = None,
+        recurrence_rrule: Optional[str] = None,
+        scope: str = 'series',
+        split_at: Optional[str] = None,
+        send_notifications: bool = True,
+    ) -> Dict[str, Any]:
+        """Modify the recurrence rule of an existing event.
+
+        Args:
+            event_id: ID of the master recurring event (or instance for scope='single')
+            calendar_id: Calendar containing the event
+            account: Google account override
+            recurrence: Structured recurrence spec (or None to clear recurrence
+                entirely when scope='series')
+            recurrence_rrule: Raw RRULE escape hatch
+            scope: 'series' replaces the master's RRULE.
+                   'this_and_following' shortens the original's UNTIL to just
+                   before ``split_at`` and inserts a new event with the new rule
+                   starting at ``split_at``.
+                   'single' overrides a single instance — pass the instance
+                   event_id (NOT the master id).
+            split_at: ISO datetime where the series should split; required for
+                scope='this_and_following'.
+            send_notifications: Send update emails to attendees.
+        """
+        if recurrence is not None and recurrence_rrule is not None:
+            return {
+                'success': False,
+                'error': "Provide either 'recurrence' or 'recurrence_rrule', not both",
+            }
+        if scope not in ('series', 'this_and_following', 'single'):
+            return {
+                'success': False,
+                'error': f"scope must be one of series|this_and_following|single, got {scope!r}",
+            }
+        if scope == 'this_and_following' and not split_at:
+            return {
+                'success': False,
+                'error': "scope='this_and_following' requires split_at",
+            }
+
+        service = self._get_service_for_calendar(calendar_id, account)
+        send_updates = 'all' if send_notifications else 'none'
+
+        try:
+            event = service.events().get(
+                calendarId=calendar_id,
+                eventId=event_id,
+            ).execute()
+        except HttpError as e:
+            return {'success': False, 'error': f"Event not found: {e}"}
+
+        start_info = event.get('start', {})
+        all_day = 'date' in start_info
+        if all_day:
+            start_dt = datetime.strptime(start_info['date'], '%Y-%m-%d').replace(
+                tzinfo=ZoneInfo(start_info.get('timeZone', 'UTC'))
+            )
+        else:
+            start_dt = datetime.fromisoformat(start_info['dateTime'].replace('Z', '+00:00'))
+
+        def _build_recurrence_array(start_for_rule: datetime) -> Optional[List[str]]:
+            if recurrence is None and recurrence_rrule is None:
+                return None
+            if recurrence is not None:
+                body = _build_rrule(recurrence, start_for_rule, all_day=all_day)
+                lines = [f"RRULE:{body}"]
+                if recurrence.get('exceptions'):
+                    lines.append(_build_exdate_line(
+                        recurrence['exceptions'], start_for_rule, all_day
+                    ))
+                return lines
+            raw = recurrence_rrule.strip()
+            body = raw[6:] if raw.upper().startswith('RRULE:') else raw
+            return [f"RRULE:{body}"]
+
+        if scope == 'series':
+            new_lines = _build_recurrence_array(start_dt)
+            patch_body = {'recurrence': new_lines if new_lines is not None else []}
+            updated = service.events().patch(
+                calendarId=calendar_id,
+                eventId=event_id,
+                body=patch_body,
+                sendUpdates=send_updates,
+            ).execute()
+            return {
+                'success': True,
+                'scope': 'series',
+                'event_id': updated['id'],
+                'recurrence': updated.get('recurrence'),
+                'message': f"Updated recurrence on series '{updated.get('summary')}'",
+            }
+
+        if scope == 'single':
+            new_lines = _build_recurrence_array(start_dt)
+            patch_body = {'recurrence': new_lines if new_lines is not None else []}
+            updated = service.events().patch(
+                calendarId=calendar_id,
+                eventId=event_id,
+                body=patch_body,
+                sendUpdates=send_updates,
+            ).execute()
+            return {
+                'success': True,
+                'scope': 'single',
+                'event_id': updated['id'],
+                'message': (
+                    "Applied recurrence patch to single event. Note: single-instance "
+                    "overrides are usually handled via dedicated instance ids."
+                ),
+            }
+
+        # scope == 'this_and_following'
+        split_dt = datetime.fromisoformat(split_at.replace('Z', '+00:00'))
+        if split_dt.tzinfo is None and start_dt.tzinfo is not None:
+            split_dt = split_dt.replace(tzinfo=start_dt.tzinfo)
+        if split_dt <= start_dt:
+            return {
+                'success': False,
+                'error': f"split_at ({split_at}) must be after the series start ({start_dt.isoformat()})",
+            }
+
+        # 1. Truncate the original series so its last occurrence is < split_at.
+        existing_rec = event.get('recurrence') or []
+        rrule_line = next((l for l in existing_rec if l.upper().startswith('RRULE:')), None)
+        if not rrule_line:
+            return {'success': False, 'error': 'Original event has no RRULE to split'}
+        existing_body = rrule_line[6:]
+        # Strip any existing UNTIL/COUNT, then set UNTIL = split_dt - 1 second (UTC Z).
+        existing_parts = [
+            p for p in existing_body.split(';')
+            if not p.upper().startswith('UNTIL=') and not p.upper().startswith('COUNT=')
+        ]
+        until_cutoff = split_dt - timedelta(seconds=1)
+        existing_parts.append(f"UNTIL={_format_until(until_cutoff, all_day)}")
+        truncated_body = ';'.join(existing_parts)
+        new_existing = [f"RRULE:{truncated_body}"] + [
+            l for l in existing_rec if not l.upper().startswith('RRULE:')
+        ]
+        service.events().patch(
+            calendarId=calendar_id,
+            eventId=event_id,
+            body={'recurrence': new_existing},
+            sendUpdates=send_updates,
+        ).execute()
+
+        # 2. Insert a new event starting at split_at with the new rule.
+        # Preserve duration from the master.
+        end_info = event.get('end', {})
+        if all_day:
+            old_end = datetime.strptime(end_info['date'], '%Y-%m-%d').replace(
+                tzinfo=start_dt.tzinfo
+            )
+        else:
+            old_end = datetime.fromisoformat(end_info['dateTime'].replace('Z', '+00:00'))
+        duration = old_end - start_dt
+        new_start = split_dt
+        new_end = new_start + duration
+
+        new_body: Dict[str, Any] = {
+            'summary': event.get('summary'),
+            'description': event.get('description'),
+            'location': event.get('location'),
+            'attendees': event.get('attendees'),
+        }
+        if all_day:
+            new_body['start'] = {'date': new_start.date().isoformat()}
+            new_body['end'] = {'date': new_end.date().isoformat()}
+        else:
+            tz = start_info.get('timeZone', 'UTC')
+            new_body['start'] = {'dateTime': new_start.isoformat(), 'timeZone': tz}
+            new_body['end'] = {'dateTime': new_end.isoformat(), 'timeZone': tz}
+
+        new_lines = _build_recurrence_array(new_start)
+        if new_lines:
+            new_body['recurrence'] = new_lines
+
+        # Drop None entries.
+        new_body = {k: v for k, v in new_body.items() if v is not None}
+
+        inserted = service.events().insert(
+            calendarId=calendar_id,
+            body=new_body,
+            sendUpdates=send_updates,
+        ).execute()
+
+        return {
+            'success': True,
+            'scope': 'this_and_following',
+            'original_event_id': event_id,
+            'new_event_id': inserted['id'],
+            'split_at': split_dt.isoformat(),
+            'message': (
+                f"Split series at {split_dt.isoformat()}: truncated original and "
+                f"inserted new event {inserted['id']}"
+            ),
+        }
 
     def respond_to_event(
         self,

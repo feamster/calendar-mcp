@@ -294,12 +294,31 @@ Check if you're available at a proposed time.
 Find best available meeting times based on your preferences (day ranking, adjacent to meetings, avoid deep work).
 
 ### 11. `create_event`
-Create a new calendar event with optional attendees and automatic invitation emails. **Multi-account:** Automatically selects the correct Google account based on `calendarId`.
+Create a new calendar event with optional attendees and automatic invitation emails. **Multi-account:** Automatically selects the correct Google account based on `calendarId`. **Recurring events:** Pass `recurrence` (structured) or `recurrenceRrule` (raw RFC 5545) to create a series:
 
-### 12. `delete_event`
+```python
+# MWF for 3 weeks
+recurrence = {"freq": "WEEKLY", "by_day": ["MO", "WE", "FR"], "until": "2026-07-24"}
+
+# First Monday of every month, for a year
+recurrence = {"freq": "MONTHLY", "by_day": ["MO"], "by_set_pos": [1], "count": 12}
+
+# MWF for 3 weeks, skipping July 13
+recurrence = {"freq": "WEEKLY", "by_day": ["MO", "WE", "FR"], "until": "2026-07-24", "exceptions": ["2026-07-13"]}
+```
+
+Supported keys: `freq` (DAILY/WEEKLY/MONTHLY/YEARLY), `interval`, `by_day`, `by_month_day`, `by_month`, `by_set_pos`, `count` (mutually exclusive with `until`), `until` (ISO date or datetime — bare dates interpreted as end-of-day in `start`'s timezone), `exceptions` (list of ISO dates to skip via EXDATE). The response includes an `occurrence_count` so you can verify the series size without listing instances.
+
+### 12. `update_event_recurrence`
+Modify the recurrence rule of an existing event without deleting and recreating:
+- `scope="series"` (default): replace the RRULE on the master event (pass `recurrence=null` to clear).
+- `scope="this_and_following"`: split the series at `splitAt` — shortens the original's `UNTIL` to just before `splitAt` and inserts a new event with the new rule starting at `splitAt`.
+- `scope="single"`: apply the change to a single instance (pass the instance event id, not the master id).
+
+### 13. `delete_event`
 Delete a calendar event with optional cancellation notifications to attendees.
 
-### 13. `respond_to_event`
+### 14. `respond_to_event`
 Accept, decline, or tentatively accept a calendar invitation.
 
 ## Block Type Detection
@@ -453,7 +472,7 @@ See [SPEC.md](SPEC.md) for detailed roadmap, including:
 - Update existing events (modify time, location, description)
 - Smart scheduling suggestions
 - Advanced meeting analytics
-- Recurring meeting tracking
+- Recurring meeting instance management (list/override individual instances of a series)
 - Cross-referencing with spark-mcp transcripts
 
 ## License
