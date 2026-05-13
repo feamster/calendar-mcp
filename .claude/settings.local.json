@@ -14,7 +14,11 @@
       "Bash(ls:*)",
       "Bash(cat:*)",
       "Bash(grep:*)",
-      "Bash(source ~/.zshrc)"
+      "Bash(source ~/.zshrc)",
+      "Bash(lsof:*)",
+      "Bash(kill:*)",
+      "Bash(pip3 install:*)",
+      "Bash(timeout 3 python3:*)"
     ]
   }
 }
