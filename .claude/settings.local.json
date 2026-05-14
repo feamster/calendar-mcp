@@ -14,7 +14,10 @@
       "Bash(ls:*)",
       "Bash(cat:*)",
       "Bash(grep:*)",
-      "Bash(source ~/.zshrc)"
+      "Bash(source ~/.zshrc)",
+      "Bash(unison:*)",
+      "Bash(git rebase -i HEAD~3 --exec 'git commit --amend --no-edit -m \"\"$(git log -1 --format=%B | grep -v \"\"🤖 Generated with\"\" | grep -v \"\"Co-Authored-By: Claude\"\" | sed \"\"/^$/N;/^\\n$/d\"\")\"\"')",
+      "Bash(git push:*)"
     ]
   }
 }
