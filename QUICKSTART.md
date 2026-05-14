@@ -143,6 +143,10 @@ See [SETUP.md](SETUP.md) for detailed troubleshooting
 - Details: "Tell me about my 2pm meeting"
 - Action items: "Find follow-ups from meetings this week"
 
+### Create Recurring Events
+
+- "Schedule MWF 1pm Censorship lectures from July 6 to July 24" — passes `recurrence={"freq":"WEEKLY","by_day":["MO","WE","FR"],"until":"2026-07-24"}` to `create_event`.
+
 ### Integration with spark-mcp
 
 If you have both installed:

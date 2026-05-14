@@ -169,6 +169,8 @@ def save_credentials_for_account(email: str, creds: Credentials):
 
 def get_credentials_for_account(email: str) -> Optional[Credentials]:
     """Get valid credentials for a specific account, refreshing if necessary."""
+    import sys
+
     creds = load_credentials_for_account(email)
 
     if not creds:
@@ -179,7 +181,8 @@ def get_credentials_for_account(email: str) -> Optional[Credentials]:
         try:
             creds.refresh(Request())
             save_credentials_for_account(email, creds)
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Failed to refresh credentials for {email}: {e}", file=sys.stderr, flush=True)
             return None
 
     return creds
