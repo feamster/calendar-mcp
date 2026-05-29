@@ -1262,6 +1262,7 @@ class CalendarClient:
         account: Optional[str] = None,
         recurrence: Optional[Dict[str, Any]] = None,
         recurrence_rrule: Optional[str] = None,
+        time_zone: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new calendar event, optionally recurring.
 
@@ -1280,6 +1281,12 @@ class CalendarClient:
                 exclusive with ``recurrence_rrule``.
             recurrence_rrule: Raw RRULE escape hatch, with or without the
                 ``RRULE:`` prefix (e.g. ``FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10``).
+            time_zone: IANA timezone name (e.g. ``"America/Chicago"``). When set,
+                ``start``/``end`` are reinterpreted as wall-clock in this zone
+                (any existing offset is discarded). Required for recurring
+                events spanning a DST transition: Google Calendar uses a fixed
+                UTC offset and shifts every post-transition instance by an hour
+                unless the request supplies a named zone.
 
         Returns:
             Dictionary with created event details including event ID. When the
@@ -1290,6 +1297,16 @@ class CalendarClient:
             raise ValueError(
                 "Provide either 'recurrence' or 'recurrence_rrule', not both"
             )
+
+        if time_zone is not None and not all_day:
+            try:
+                tz = ZoneInfo(time_zone)
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid time_zone {time_zone!r}; use an IANA name like 'America/Chicago'"
+                ) from e
+            start = start.replace(tzinfo=tz)
+            end = end.replace(tzinfo=tz)
 
         # Get the appropriate service (auto-infers account from calendar_id)
         service = self._get_service_for_calendar(calendar_id, account)

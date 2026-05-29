@@ -169,7 +169,8 @@ TOOLS: list[Tool] = [
                     },
                     "required": ["freq"]
                 },
-                "recurrenceRrule": {"type": "string", "description": "Raw RFC 5545 RRULE escape hatch, e.g. 'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10'"}
+                "recurrenceRrule": {"type": "string", "description": "Raw RFC 5545 RRULE escape hatch, e.g. 'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10'"},
+                "timeZone": {"type": "string", "description": "IANA timezone (e.g. 'America/Chicago'). When set, start/end are interpreted as wall-clock in this zone and any UTC offset in the ISO string is discarded. Use this for recurring events that span a DST transition — Google Calendar needs a named zone, not a fixed offset, to keep instances on the same local wall-clock."}
             },
             "required": ["summary", "start", "end"]
         }
@@ -509,6 +510,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             account = arguments.get('account')  # Optional account override
             recurrence = arguments.get('recurrence')
             recurrence_rrule = arguments.get('recurrenceRrule')
+            time_zone = arguments.get('timeZone')
 
             if not summary or not start_str or not end_str:
                 return [TextContent(
@@ -541,20 +543,27 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                     })
                 )]
 
-            result = calendar.create_event(
-                summary=summary,
-                start=start,
-                end=end,
-                description=description,
-                location=location,
-                attendees=attendees,
-                send_notifications=send_notifications,
-                calendar_id=calendar_id,
-                all_day=all_day,
-                account=account,
-                recurrence=recurrence,
-                recurrence_rrule=recurrence_rrule,
-            )
+            try:
+                result = calendar.create_event(
+                    summary=summary,
+                    start=start,
+                    end=end,
+                    description=description,
+                    location=location,
+                    attendees=attendees,
+                    send_notifications=send_notifications,
+                    calendar_id=calendar_id,
+                    all_day=all_day,
+                    account=account,
+                    recurrence=recurrence,
+                    recurrence_rrule=recurrence_rrule,
+                    time_zone=time_zone,
+                )
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({'error': str(e)})
+                )]
 
             return [TextContent(
                 type="text",

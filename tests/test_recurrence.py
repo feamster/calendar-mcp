@@ -323,3 +323,69 @@ def test_create_event_dst_spanning_series_preserves_tz():
     body = _captured_body(svc)
     # tz preserved on the wire.
     assert "America/Chicago" in body["start"]["timeZone"]
+
+
+# ---------- time_zone kwarg: IANA name on the wire (DST-correct recurrence) ----------
+
+def test_create_event_time_zone_replaces_fixed_offset_with_iana():
+    # Mimics the MCP server path: caller passes an offset-aware datetime
+    # parsed from an ISO string (fixed-offset tzinfo, str(tz) == "UTC-05:00"),
+    # plus an explicit IANA name. The IANA name must reach Google so that
+    # recurring instances honor wall-clock across DST.
+    client, svc = _make_client_with_mock_service()
+    svc.events.return_value.insert.return_value.execute.return_value = {
+        "id": "evt200",
+        "summary": "DST kwarg",
+        "start": {"dateTime": "2026-09-30T16:30:00-05:00"},
+        "end": {"dateTime": "2026-09-30T19:20:00-05:00"},
+    }
+    # Simulate what server.py does with datetime.fromisoformat(...) — fixed offset.
+    start = datetime.fromisoformat("2026-09-30T16:30:00-05:00")
+    end = datetime.fromisoformat("2026-09-30T19:20:00-05:00")
+    assert str(start.tzinfo) == "UTC-05:00"  # guard: this is the failure mode we fix
+
+    client.create_event(
+        summary="DST kwarg",
+        start=start,
+        end=end,
+        recurrence={"freq": "WEEKLY", "by_day": ["WE"], "count": 10},
+        time_zone="America/Chicago",
+    )
+    body = _captured_body(svc)
+    assert body["start"]["timeZone"] == "America/Chicago"
+    assert body["end"]["timeZone"] == "America/Chicago"
+    # Wall-clock preserved: 16:30 stays 16:30 in Chicago.
+    assert body["start"]["dateTime"].startswith("2026-09-30T16:30:00")
+
+
+def test_create_event_time_zone_accepts_naive_datetime():
+    client, svc = _make_client_with_mock_service()
+    svc.events.return_value.insert.return_value.execute.return_value = {
+        "id": "evt201",
+        "summary": "naive",
+        "start": {"dateTime": "2026-09-30T16:30:00-05:00"},
+        "end": {"dateTime": "2026-09-30T17:30:00-05:00"},
+    }
+    start = datetime(2026, 9, 30, 16, 30)  # naive
+    end = datetime(2026, 9, 30, 17, 30)
+    client.create_event(
+        summary="naive",
+        start=start,
+        end=end,
+        time_zone="America/Chicago",
+    )
+    body = _captured_body(svc)
+    assert body["start"]["timeZone"] == "America/Chicago"
+
+
+def test_create_event_time_zone_rejects_unknown_iana_name():
+    client, svc = _make_client_with_mock_service()
+    start = datetime(2026, 9, 30, 16, 30)
+    end = datetime(2026, 9, 30, 17, 30)
+    with pytest.raises(ValueError, match="Invalid time_zone"):
+        client.create_event(
+            summary="bad tz",
+            start=start,
+            end=end,
+            time_zone="Mars/Olympus_Mons",
+        )
