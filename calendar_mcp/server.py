@@ -13,7 +13,7 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
 
-from .calendar_client import CalendarClient
+from .calendar_client import CalendarClient, CalendarResolutionError
 
 
 # Initialize calendar client with detailed error handling
@@ -87,7 +87,8 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "eventId": {"type": "string", "description": "Calendar event ID"}
+                "eventId": {"type": "string", "description": "Calendar event ID"},
+                "calendarId": {"type": "string", "description": "Calendar id or display name (e.g. 'Chemster Events'). Optional — when omitted, searches across all accessible calendars."}
             },
             "required": ["eventId"]
         }
@@ -273,10 +274,13 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 'calendars': [
                     {
                         'id': cal.get('id'),
-                        'name': cal.get('summary'),
+                        'summary': cal.get('summary'),
+                        'summaryOverride': cal.get('summaryOverride'),
+                        'name': cal.get('summaryOverride') or cal.get('summary'),
                         'description': cal.get('description', ''),
                         'primary': cal.get('primary', False),
                         'accessRole': cal.get('accessRole'),
+                        'account': cal.get('account'),
                         'backgroundColor': cal.get('backgroundColor'),
                         'foregroundColor': cal.get('foregroundColor')
                     }
@@ -387,6 +391,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
         elif name == "get_meeting_by_id":
             event_id = arguments.get('eventId')
+            calendar_id = arguments.get('calendarId')
 
             if not event_id:
                 return [TextContent(
@@ -394,7 +399,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                     text=json.dumps({'error': 'eventId is required'})
                 )]
 
-            result = calendar.get_event_by_id(event_id)
+            result = calendar.get_event_by_id(event_id, calendar_id=calendar_id)
 
             return [TextContent(
                 type="text",
@@ -675,6 +680,12 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 type="text",
                 text=json.dumps({'error': f'Unknown tool: {name}'})
             )]
+
+    except CalendarResolutionError as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps(e.to_dict(), indent=2)
+        )]
 
     except Exception as e:
         return [TextContent(

@@ -245,6 +245,28 @@ def _count_occurrences(rrule_body: str, start_dt: datetime) -> Tuple[Optional[in
     return (len(occurrences), occurrences[0], occurrences[-1])
 
 
+class CalendarResolutionError(Exception):
+    """Raised when a calendar display name can't be resolved to a single id.
+
+    Carries a structured payload (``to_dict()``) so the MCP layer can surface
+    candidates or available names to the caller instead of a bare string.
+    """
+
+    def __init__(self, message: str, *, kind: str, candidates: List[Dict[str, Any]], query: str):
+        super().__init__(message)
+        self.kind = kind  # "ambiguous" | "not_found"
+        self.candidates = candidates
+        self.query = query
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "error": str(self),
+            "kind": self.kind,
+            "query": self.query,
+            "candidates": self.candidates,
+        }
+
+
 class CalendarClient:
     """Client for Google Calendar API operations with multi-account support."""
 
@@ -345,8 +367,9 @@ class CalendarClient:
 
         Priority:
         1. Explicit account parameter
-        2. Inferred from calendar_id
-        3. Default account
+        2. Inferred from calendar_id (email-style ids)
+        3. Account that surfaced this calendar_id in get_all_calendars
+        4. Default account
 
         Args:
             calendar_id: The calendar ID
@@ -364,7 +387,14 @@ class CalendarClient:
         if inferred:
             return self._get_service_for_account(inferred)
 
-        # Fall back to default
+        # Group calendars (...@group.calendar.google.com) and other non-email
+        # ids — consult the calendarList we already fetched to find the right
+        # account. Falls back to default if we haven't populated the cache yet.
+        if self._calendars_cache:
+            for cal in self._calendars_cache:
+                if cal.get("id") == calendar_id and cal.get("account") in self._services:
+                    return self._services[cal["account"]]
+
         return self._default_service
 
     def get_configured_accounts(self) -> List[str]:
@@ -390,24 +420,131 @@ class CalendarClient:
         """Get list of calendar IDs to ignore when checking availability."""
         return self._config.get('ignore_calendars_for_availability', [])
 
-    def get_all_calendars(self) -> List[Dict[str, Any]]:
-        """Get list of all calendars user has access to.
+    def get_all_calendars(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """Get list of all calendars across every configured account.
+
+        Iterates the calendarList of every configured account so that calendars
+        only visible to one of several accounts still surface. Each entry gains
+        an ``account`` field naming the account whose calendarList it came from.
+        If the same calendar id appears in multiple accounts (a shared
+        calendar), the entry from the account with the higher access role
+        wins, falling back to first-seen order.
+
+        Args:
+            force_refresh: Re-fetch calendarList for every account instead of
+                returning the cached list.
 
         Returns:
-            List of calendar dictionaries with id, summary, description, etc.
+            List of calendar dictionaries from the Google API, each augmented
+            with an ``account`` key.
         """
-        if self._calendars_cache is not None:
+        if self._calendars_cache is not None and not force_refresh:
             return self._calendars_cache
 
-        try:
-            calendar_list = self.service.calendarList().list().execute()
-            calendars = calendar_list.get('items', [])
+        # Higher number = stronger relationship to the calendar; used to break
+        # ties when the same id appears in multiple accounts' lists.
+        role_rank = {"owner": 4, "writer": 3, "reader": 2, "freeBusyReader": 1}
 
-            # Cache the results
-            self._calendars_cache = calendars
-            return calendars
-        except HttpError as e:
-            return []
+        merged: Dict[str, Dict[str, Any]] = {}
+        per_account: Dict[str, List[Dict[str, Any]]] = {}
+
+        services = self._services or ({} if self._default_service is None else {"default": self._default_service})
+        for account, service in services.items():
+            try:
+                calendar_list = service.calendarList().list().execute()
+            except HttpError:
+                per_account[account] = []
+                continue
+
+            items = calendar_list.get("items", [])
+            per_account[account] = items
+
+            for cal in items:
+                cal_id = cal.get("id")
+                if not cal_id:
+                    continue
+                tagged = dict(cal)
+                tagged["account"] = account
+                existing = merged.get(cal_id)
+                if existing is None:
+                    merged[cal_id] = tagged
+                    continue
+                # Prefer the account with the stronger access role.
+                if role_rank.get(tagged.get("accessRole"), 0) > role_rank.get(existing.get("accessRole"), 0):
+                    merged[cal_id] = tagged
+
+        self._calendars_cache = list(merged.values())
+        self._calendars_cache_by_account = per_account
+        return self._calendars_cache
+
+    def resolve_calendar_id(self, name_or_id: str, account: Optional[str] = None) -> str:
+        """Resolve a display name to a calendar id, passing real ids through.
+
+        Resolution rules:
+
+        - ``primary`` and ids containing ``@`` (email or
+          ``...@group.calendar.google.com``) pass through unchanged.
+        - Otherwise the input is matched case-insensitively (and trimmed)
+          against each calendar's ``summary`` and ``summaryOverride``.
+        - If ``account`` is given, only calendars from that account are
+          considered.
+        - Exactly one match → that id. Multiple → CalendarResolutionError
+          with the candidate list. Zero → CalendarResolutionError listing the
+          available calendar names so the caller can show valid options.
+
+        Args:
+            name_or_id: Calendar id, ``primary``, or display name.
+            account: Optional account scope for name lookup.
+
+        Returns:
+            The calendar id to use with the Google Calendar API.
+        """
+        if name_or_id is None:
+            return name_or_id  # let downstream default-handling apply
+        candidate = name_or_id.strip()
+        if not candidate or candidate == "primary" or "@" in candidate:
+            return candidate
+
+        needle = candidate.casefold()
+        calendars = self.get_all_calendars()
+        matches: List[Dict[str, Any]] = []
+        for cal in calendars:
+            if account and cal.get("account") != account:
+                continue
+            names = [cal.get("summary"), cal.get("summaryOverride")]
+            if any(n and n.strip().casefold() == needle for n in names):
+                matches.append(cal)
+
+        if len(matches) == 1:
+            return matches[0]["id"]
+
+        def _entry(cal: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "id": cal.get("id"),
+                "name": cal.get("summaryOverride") or cal.get("summary"),
+                "account": cal.get("account"),
+                "accessRole": cal.get("accessRole"),
+            }
+
+        if len(matches) > 1:
+            raise CalendarResolutionError(
+                f"Calendar name {candidate!r} is ambiguous; pass account=... or the calendar id to disambiguate",
+                kind="ambiguous",
+                candidates=[_entry(c) for c in matches],
+                query=candidate,
+            )
+
+        # Zero matches — surface the available names (optionally scoped).
+        available = [
+            _entry(c) for c in calendars
+            if not account or c.get("account") == account
+        ]
+        raise CalendarResolutionError(
+            f"No calendar named {candidate!r}",
+            kind="not_found",
+            candidates=available,
+            query=candidate,
+        )
 
     def list_events(
         self,
@@ -438,18 +575,23 @@ class CalendarClient:
         if time_max is None:
             time_max = time_min + timedelta(days=7)
 
-        # Get all calendars if not specified
+        # Get all calendars if not specified, otherwise resolve any names.
         if calendar_ids is None:
             calendars = self.get_all_calendars()
             calendar_ids = [cal['id'] for cal in calendars]
+        else:
+            calendar_ids = [self.resolve_calendar_id(cid) for cid in calendar_ids]
 
         all_events = []
 
-        # Query each calendar
+        # Query each calendar via the service for the account that surfaced
+        # it (so a UChicago-only calendar is queried against the UChicago
+        # token, not whichever account happens to be default).
         errors = []
         for calendar_id in calendar_ids:
+            service = self._get_service_for_calendar(calendar_id)
             try:
-                events_result = self.service.events().list(
+                events_result = service.events().list(
                     calendarId=calendar_id,
                     timeMin=time_min.isoformat(),
                     timeMax=time_max.isoformat(),
@@ -507,11 +649,11 @@ class CalendarClient:
         return result
 
     def _get_calendar_name(self, calendar_id: str) -> str:
-        """Get calendar name from ID."""
+        """Get the display name of a calendar (summaryOverride wins over summary)."""
         calendars = self.get_all_calendars()
         for cal in calendars:
             if cal['id'] == calendar_id:
-                return cal.get('summary', calendar_id)
+                return cal.get('summaryOverride') or cal.get('summary') or calendar_id
         return calendar_id
 
     def get_upcoming_meetings(
@@ -656,10 +798,12 @@ class CalendarClient:
         Returns:
             Dictionary with event details
         """
-        # If calendar_id provided, query that calendar
+        # If calendar_id provided, query that calendar (resolving names).
         if calendar_id:
+            calendar_id = self.resolve_calendar_id(calendar_id)
+            service = self._get_service_for_calendar(calendar_id)
             try:
-                event = self.service.events().get(
+                event = service.events().get(
                     calendarId=calendar_id,
                     eventId=event_id
                 ).execute()
@@ -1308,6 +1452,9 @@ class CalendarClient:
             start = start.replace(tzinfo=tz)
             end = end.replace(tzinfo=tz)
 
+        # Resolve display names to ids (passes 'primary' and real ids through).
+        calendar_id = self.resolve_calendar_id(calendar_id, account=account)
+
         # Get the appropriate service (auto-infers account from calendar_id)
         service = self._get_service_for_calendar(calendar_id, account)
 
@@ -1371,14 +1518,17 @@ class CalendarClient:
 
         # Determine which account was used
         used_account = account or self._infer_account_from_calendar_id(calendar_id) or get_default_account()
+        resolved_calendar_name = self._get_calendar_name(calendar_id)
 
         response: Dict[str, Any] = {
             'success': True,
             'event_id': created_event['id'],
             'event_link': created_event.get('htmlLink'),
             'summary': created_event['summary'],
-            'start': created_event['start'].get('dateTime', created_event['start'].get('date')),
-            'end': created_event['end'].get('dateTime', created_event['end'].get('date')),
+            # Google-stored start/end with the timeZone field preserved so the
+            # caller can report "5:10 PM CDT" instead of just echoing inputs.
+            'start': created_event.get('start'),
+            'end': created_event.get('end'),
             'attendees': [
                 {
                     'email': att['email'],
@@ -1387,8 +1537,14 @@ class CalendarClient:
                 for att in created_event.get('attendees', [])
             ] if attendees else [],
             'created': created_event.get('created'),
-            'organizer_account': used_account,
-            'message': f"Event '{summary}' created successfully" + (f" (organizer: {used_account})" if used_account else "")
+            'resolved_calendar_id': calendar_id,
+            'resolved_calendar_name': resolved_calendar_name,
+            'account': used_account,
+            'organizer_account': used_account,  # legacy alias
+            'message': (
+                f"Event '{summary}' created on {resolved_calendar_name!r}"
+                + (f" ({used_account})" if used_account else "")
+            )
         }
 
         if rrule_body:
@@ -1433,6 +1589,9 @@ class CalendarClient:
         Returns:
             Dictionary with success status
         """
+        # Resolve display names to ids (passes 'primary' and real ids through).
+        calendar_id = self.resolve_calendar_id(calendar_id, account=account)
+
         # Get the appropriate service
         service = self._get_service_for_calendar(calendar_id, account)
 
@@ -1689,6 +1848,9 @@ class CalendarClient:
         Returns:
             Dictionary with success status and updated event details
         """
+        # Resolve display names to ids (passes 'primary' and real ids through).
+        calendar_id = self.resolve_calendar_id(calendar_id, account=account)
+
         # Get the appropriate service
         service = self._get_service_for_calendar(calendar_id, account)
 

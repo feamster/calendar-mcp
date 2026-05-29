@@ -129,6 +129,14 @@ create_event(summary="Meeting", calendarId="feamster@uchicago.edu", attendees=["
 create_event(summary="Personal", calendarId="feamster@gmail.com", attendees=["friend@example.com"])
 ```
 
+**Calendar display names:** `calendarId` accepts a calendar's display name in
+addition to its raw id. `create_event(calendarId="Chemster Events")` resolves
+to the underlying `...@group.calendar.google.com` id by matching against the
+`summary`/`summaryOverride` fields returned by `list_all_calendars` (case-
+insensitive, trimmed). If a name is shared across accounts pass `account=...`
+to disambiguate; an unknown name returns a structured error listing the
+available calendars. `primary` and raw ids are passed through unchanged.
+
 ### 5. Configure Meeting Preferences (Optional)
 
 Create `~/.mcp-config/calendar/config.json` to customize your scheduling preferences:
