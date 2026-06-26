@@ -1,6 +1,7 @@
 """Google Calendar API client wrapper with multi-account support."""
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -18,6 +19,15 @@ from .auth import (
 )
 import json
 from pathlib import Path
+
+
+# Retries for transient transport-layer failures. googleapiclient's num_retries
+# catches ssl.SSLError (including the "EOF occurred in violation of protocol
+# (_ssl.c:2406)" teardown seen when a pooled keep-alive socket has gone stale)
+# and socket errors, sleeping rand()*2**n seconds between attempts. All reads and
+# idempotent writes (get/list/patch/update/delete) are safe to retry directly;
+# event creation is made safe by _insert_event() supplying a client-side id.
+_NUM_RETRIES = 4
 
 
 _WEEKDAY_CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
@@ -451,7 +461,7 @@ class CalendarClient:
         services = self._services or ({} if self._default_service is None else {"default": self._default_service})
         for account, service in services.items():
             try:
-                calendar_list = service.calendarList().list().execute()
+                calendar_list = service.calendarList().list().execute(num_retries=_NUM_RETRIES)
             except HttpError:
                 per_account[account] = []
                 continue
@@ -600,7 +610,7 @@ class CalendarClient:
                     orderBy='startTime' if single_events else None,
                     q=query,
                     showDeleted=False
-                ).execute()
+                ).execute(num_retries=_NUM_RETRIES)
 
                 events = events_result.get('items', [])
 
@@ -806,7 +816,7 @@ class CalendarClient:
                 event = service.events().get(
                     calendarId=calendar_id,
                     eventId=event_id
-                ).execute()
+                ).execute(num_retries=_NUM_RETRIES)
 
                 event['_calendar_id'] = calendar_id
                 event['_calendar_name'] = self._get_calendar_name(calendar_id)
@@ -821,7 +831,7 @@ class CalendarClient:
                 event = self.service.events().get(
                     calendarId=cal['id'],
                     eventId=event_id
-                ).execute()
+                ).execute(num_retries=_NUM_RETRIES)
 
                 event['_calendar_id'] = cal['id']
                 event['_calendar_name'] = cal.get('summary', cal['id'])
@@ -1392,6 +1402,41 @@ class CalendarClient:
 
     # ===== Write Operations =====
 
+    def _insert_event(
+        self,
+        service: Any,
+        calendar_id: str,
+        body: Dict[str, Any],
+        send_updates: str,
+    ) -> Dict[str, Any]:
+        """Insert an event idempotently and resiliently.
+
+        Unlike reads and updates, ``events().insert`` is not naturally
+        idempotent: a transport-level retry after the request reached Google but
+        the response was lost (e.g. the ssl.c:2406 EOF teardown of a stale
+        keep-alive socket) would create a duplicate. To prevent that we assign a
+        client-generated event id up front, so a retried insert collides with
+        the already-created event and Google returns 409 — which we treat as
+        success by fetching and returning the existing event.
+        """
+        body = dict(body)
+        body.setdefault("id", uuid.uuid4().hex)  # 0-9a-f is valid base32hex
+        event_id = body["id"]
+        try:
+            return service.events().insert(
+                calendarId=calendar_id,
+                body=body,
+                sendUpdates=send_updates,
+            ).execute(num_retries=_NUM_RETRIES)
+        except HttpError as e:
+            if getattr(e, "resp", None) is not None and e.resp.status == 409:
+                # Duplicate id — a prior (retried) attempt already landed it.
+                return service.events().get(
+                    calendarId=calendar_id,
+                    eventId=event_id,
+                ).execute(num_retries=_NUM_RETRIES)
+            raise
+
     def create_event(
         self,
         summary: str,
@@ -1509,12 +1554,13 @@ class CalendarClient:
                 recurrence_lines.append(_build_exdate_line(exceptions, start, all_day))
             event['recurrence'] = recurrence_lines
 
-        # Create the event
-        created_event = service.events().insert(
-            calendarId=calendar_id,
-            body=event,
-            sendUpdates='all' if send_notifications else 'none'
-        ).execute()
+        # Create the event (idempotent + retried against transient SSL/socket errors)
+        created_event = self._insert_event(
+            service,
+            calendar_id,
+            event,
+            'all' if send_notifications else 'none',
+        )
 
         # Determine which account was used
         used_account = account or self._infer_account_from_calendar_id(calendar_id) or get_default_account()
@@ -1600,7 +1646,7 @@ class CalendarClient:
             event = service.events().get(
                 calendarId=calendar_id,
                 eventId=event_id
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
 
             event_summary = event.get('summary', 'Untitled Event')
 
@@ -1609,7 +1655,7 @@ class CalendarClient:
                 calendarId=calendar_id,
                 eventId=event_id,
                 sendUpdates='all' if send_notifications else 'none'
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
 
             return {
                 'success': True,
@@ -1676,7 +1722,7 @@ class CalendarClient:
             event = service.events().get(
                 calendarId=calendar_id,
                 eventId=event_id,
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
         except HttpError as e:
             return {'success': False, 'error': f"Event not found: {e}"}
 
@@ -1712,7 +1758,7 @@ class CalendarClient:
                 eventId=event_id,
                 body=patch_body,
                 sendUpdates=send_updates,
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
             return {
                 'success': True,
                 'scope': 'series',
@@ -1729,7 +1775,7 @@ class CalendarClient:
                 eventId=event_id,
                 body=patch_body,
                 sendUpdates=send_updates,
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
             return {
                 'success': True,
                 'scope': 'single',
@@ -1772,7 +1818,7 @@ class CalendarClient:
             eventId=event_id,
             body={'recurrence': new_existing},
             sendUpdates=send_updates,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
 
         # 2. Insert a new event starting at split_at with the new rule.
         # Preserve duration from the master.
@@ -1808,11 +1854,7 @@ class CalendarClient:
         # Drop None entries.
         new_body = {k: v for k, v in new_body.items() if v is not None}
 
-        inserted = service.events().insert(
-            calendarId=calendar_id,
-            body=new_body,
-            sendUpdates=send_updates,
-        ).execute()
+        inserted = self._insert_event(service, calendar_id, new_body, send_updates)
 
         return {
             'success': True,
@@ -1866,7 +1908,7 @@ class CalendarClient:
             event = service.events().get(
                 calendarId=calendar_id,
                 eventId=event_id
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
 
             # Check if this is a recurring event instance
             recurring_event_id = event.get('recurringEventId')
@@ -1880,7 +1922,7 @@ class CalendarClient:
                 event = service.events().get(
                     calendarId=calendar_id,
                     eventId=target_event_id
-                ).execute()
+                ).execute(num_retries=_NUM_RETRIES)
 
             # Get current user's email from credentials
             # We'll look for the attendee matching our calendar
@@ -1907,7 +1949,7 @@ class CalendarClient:
                 calendarId=calendar_id,
                 eventId=target_event_id,
                 body=event
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
 
             message = f"Responded '{response}' to event '{updated_event.get('summary')}'"
             if respond_to_series and is_recurring:
@@ -2001,7 +2043,7 @@ class CalendarClient:
                     full_event = service.events().get(
                         calendarId=calendar_id,
                         eventId=event_id
-                    ).execute()
+                    ).execute(num_retries=_NUM_RETRIES)
 
                     # Update response status
                     attendees = full_event.get('attendees', [])
@@ -2015,7 +2057,7 @@ class CalendarClient:
                         calendarId=calendar_id,
                         eventId=event_id,
                         body=full_event
-                    ).execute()
+                    ).execute(num_retries=_NUM_RETRIES)
 
                     updated_events.append({
                         'event_id': event_id,
