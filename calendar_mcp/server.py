@@ -10,7 +10,7 @@ from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import CallToolResult, ListToolsResult, Tool, TextContent
 from mcp.server.stdio import stdio_server
 
 from .calendar_client import CalendarClient, CalendarResolutionError
@@ -27,9 +27,6 @@ except Exception as e:
     print(error_msg, file=sys.stderr, flush=True)
     raise RuntimeError(f"Calendar MCP initialization failed: {str(e)}") from e
 
-
-# Create server instance
-server = Server("calendar-mcp-server")
 
 
 # Define tools - minimal descriptions following spark-mcp best practices
@@ -241,13 +238,11 @@ TOOLS: list[Tool] = [
 ]
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
     return TOOLS
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     """Handle tool calls."""
     try:
@@ -692,6 +687,22 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             type="text",
             text=json.dumps({'error': str(e)})
         )]
+
+
+# MCP SDK 2.x passes request handlers to the Server constructor instead of
+# registering them with decorators; these adapt the handlers above.
+async def _on_list_tools(ctx, params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(ctx, params) -> CallToolResult:
+    return CallToolResult(content=list(await call_tool(params.name, params.arguments or {})))
+
+
+server = Server(
+    "calendar-mcp-server",
+    on_list_tools=_on_list_tools, on_call_tool=_on_call_tool,
+)
 
 
 async def main():

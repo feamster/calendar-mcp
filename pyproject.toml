@@ -1,0 +1,16 @@
+[project]
+name = "calendar-mcp"
+version = "0.1.0"
+description = "MCP server for Google Calendar access and analysis"
+requires-python = ">=3.10"
+dependencies = [
+    "google-auth-oauthlib>=1.0.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-api-python-client>=2.100.0",
+    "python-dateutil>=2.8.0",
+    "mcp>=2.3,<3",
+]
+
+[tool.uv]
+# Run in place with `uv run`; dependencies only, no package build
+package = false
